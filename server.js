@@ -73,9 +73,19 @@ wss.on('connection', (ws) => {
     if (isBinary) {
       if (!currentRoom || !rooms[currentRoom]) return;
       const room = rooms[currentRoom];
+      if (!room._firstAudioTime) {
+        room._firstAudioTime = Date.now();
+        console.log(`[Audio] First audio packet from sender (room ${currentRoom})`);
+      }
       if (room.receivers) {
         room.receivers.forEach(r => {
-          if (r.readyState === 1) r.send(raw);
+          if (r.readyState === 1) {
+            if (!r._firstRelayTime) {
+              r._firstRelayTime = Date.now();
+              console.log(`[Audio] First relay to receiver (room ${currentRoom}, latency: ${Date.now() - room._firstAudioTime}ms)`);
+            }
+            r.send(raw);
+          }
         });
       }
       return;
@@ -91,7 +101,7 @@ wss.on('connection', (ws) => {
         do { code = generateCode(); } while (rooms[code]);
         const p2pOnly = !!msg.p2pOnly;
         const maxConnections = Math.max(1, Math.min(20, parseInt(msg.maxConnections) || 5));
-        rooms[code] = { sender: ws, p2pOnly, maxConnections, receivers: [], receiverCount: 0 };
+        rooms[code] = { sender: ws, p2pOnly, maxConnections, receivers: [], receiverCount: 0, _host: msg.host };
         currentRoom = code;
         currentRole = 'sender';
 
@@ -125,7 +135,14 @@ wss.on('connection', (ws) => {
         currentRoom = code;
         currentRole = 'receiver';
         const count = room.receivers.length;
-        ws.send(JSON.stringify({ type: 'joined', code, receiverIndex: count }));
+        // 生成二维码数据
+        const host = room._host || 'www.u1w2.com';
+        const joinUrl = `https://${host}/receiver?code=${code}&t=${Date.now()}`;
+        let qrDataUrl = null;
+        try {
+          qrDataUrl = await generateQRDataUrl(joinUrl);
+        } catch (_) {}
+        ws.send(JSON.stringify({ type: 'joined', code, receiverIndex: count, qrDataUrl, joinUrl }));
         // Notify sender with connection count and room config
         room.sender?.send(JSON.stringify({ type: 'peer-ready', connections: count, receiverIndex: count }));
         // Notify receiver of room mode
@@ -191,7 +208,7 @@ wss.on('connection', (ws) => {
       if (currentRole === 'sender') {
         // Sender left - notify all receivers and delete room
         room.receivers.forEach(r => {
-          r.send(JSON.stringify({ type: 'peer-disconnected' }));
+          try { r.send(JSON.stringify({ type: 'peer-disconnected' })); } catch(_) {}
         });
         delete rooms[currentRoom];
         console.log(`[Room] Deleted (sender left): ${currentRoom}`);
@@ -200,8 +217,11 @@ wss.on('connection', (ws) => {
         const idx = room.receivers.indexOf(ws);
         if (idx !== -1) room.receivers.splice(idx, 1);
         const count = room.receivers.length;
-        room.sender?.send(JSON.stringify({ type: 'peer-left', connections: count }));
-        console.log(`[Room] Receiver left: ${currentRoom} (remaining: ${count})`);
+        const receiverId = 'device-' + (idx + 1);
+        if (room.sender && room.sender.readyState === 1) {
+          room.sender.send(JSON.stringify({ type: 'peer-left', connections: count, receiverId }));
+        }
+        console.log(`[Room] Receiver left: ${currentRoom} (idx=${idx+1}, remaining: ${count})`);
       }
     }
   });

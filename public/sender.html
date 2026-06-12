@@ -96,13 +96,20 @@
     background: rgba(102, 126, 234, 0.1); border-left: 3px solid #667eea;
     border-radius: 0 8px 8px 0; font-size: 13px; color: #aab; text-align: left;
   }
-
   .device-item {
     display: flex; align-items: center; justify-content: space-between;
     padding: 8px 12px; margin-bottom: 6px;
     background: rgba(255,255,255,0.03); border-radius: 8px; font-size: 13px;
   }
   .device-item .device-id { color: #aaa; font-family: monospace; }
+  .wave-container {
+    height: 60px; margin: 16px 0;
+    display: flex; align-items: center; justify-content: center; gap: 3px;
+  }
+  .wave-bar {
+    width: 4px; background: linear-gradient(to top, #667eea, #764ba2);
+    border-radius: 2px; transition: height 0.08s;
+  }
 </style>
 </head>
 <body>
@@ -163,6 +170,8 @@
       </div>
     </div>
 
+    <div class="wave-container" id="waveContainer"></div>
+
     <button class="btn btn-danger" id="btnStop" onclick="stopStreaming()">⏹ 停止推流</button>
 
   </div>
@@ -178,9 +187,6 @@ let roomCode = null;
 let receiverUrl = '';
 let audioStream = null;
 let localAudioCtx = null;
-let meterCtx = null;
-let analyser = null;
-let volumeAnimFrame = null;
 let processor = null;
 let sourceNode = null;
 let silentGain = null;
@@ -189,12 +195,12 @@ let durationInterval = null;
 let isStreaming = false;
 let relayEnabled = true;
 let deviceCounter = 0;
-let deviceList = {}; // { deviceId: { num, mode } }
+let deviceList = {};
 
 // WebRTC
-let peerConnections = {}; // { deviceId: RTCPeerConnection }
+let peerConnections = {};
 let localAudioTrack = null;
-const P2P_TIMEOUT = 10000; // 10s fallback to relay
+const P2P_TIMEOUT = 10000;
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 // --- Check secure context ---
@@ -228,7 +234,10 @@ function connectWS() {
 
     ws.onopen = () => { clearTimeout(timeout); resolve(); };
     ws.onerror = (e) => { clearTimeout(timeout); reject(e); };
-    ws.onclose = () => { setStatus('disconnected', '连接断开'); };
+    ws.onclose = () => {
+      setStatus('disconnected', '连接断开');
+      document.getElementById('btnCreate').disabled = false;
+    };
 
     ws.onmessage = (e) => {
       if (e.data instanceof ArrayBuffer) return;
@@ -246,7 +255,6 @@ async function createRoom() {
   const p2pOnly = false;
   const maxConnections = parseInt(document.getElementById('inputMaxConn').value) || 5;
 
-  // 先获取音频（弹系统窗口），再创建房间
   const audioOk = await requestAudioSource();
   if (!audioOk) {
     document.getElementById('btnCreate').disabled = false;
@@ -287,38 +295,24 @@ function handleSignaling(msg) {
       }
       break;
 
-    case 'peer-ready':
+    case 'peer-ready': {
       document.getElementById('connCount').textContent = msg.connections || 1;
-      // Add a new device entry with stable ID matching receiver
       const devId = 'device-' + (msg.receiverIndex || (deviceCounter + 1));
       deviceCounter++;
       deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
       updateDeviceList();
-      // Start WebRTC P2P attempt
       if (localAudioTrack) {
         startP2P(devId);
       }
       if (!isStreaming) {
-        setStatus('streaming', '设备已连接，正在启动推流（中继）...');
-        // 如果 audioStream 还在但管线停了，重启管线
-        if (audioStream && localAudioTrack && localAudioTrack.readyState === 'live') {
-          autoStartStreaming();
-        } else {
-          autoStartStreaming(); // 没有流的话内部会重新请求
-        }
+        setStatus('streaming', '设备已连接，正在启动推流...');
+        autoStartStreaming();
       } else {
-        // 已有推流管线，确保中继开启（P2P 可能还没连上）
         relayEnabled = true;
-        if (localAudioCtx) {
-          ws.send(JSON.stringify({
-            type: 'audio-meta',
-            sampleRate: localAudioCtx.sampleRate,
-            channels: 1
-          }));
-        }
         setStatus('streaming', '正在推流 🎵 (' + (msg.connections || 1) + ' 个设备)');
       }
       break;
+    }
 
     case 'connection-status':
       if (msg.receiverId && deviceList[msg.receiverId]) {
@@ -341,24 +335,21 @@ function handleSignaling(msg) {
       }
       break;
 
-    case 'peer-left':
+    case 'peer-left': {
       document.getElementById('connCount').textContent = msg.connections || 0;
-      // Remove the correct device from list
       if (msg.receiverId && deviceList[msg.receiverId]) {
         cleanupPeerConnection(msg.receiverId);
         delete deviceList[msg.receiverId];
-        updateDeviceList();
+      } else {
+        const keys = Object.keys(deviceList);
+        if (keys.length > 0) {
+          cleanupPeerConnection(keys[0]);
+          delete deviceList[keys[0]];
+        }
       }
+      updateDeviceList();
       if (msg.connections === 0) {
-        // 所有人断开，只停管线，保留 audioStream
-        if (processor) { processor.disconnect(); processor = null; }
-        if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
-        if (silentGain) { silentGain.disconnect(); silentGain = null; }
-        if (localAudioCtx) { localAudioCtx.close().catch(() => {}); localAudioCtx = null; }
-        if (meterCtx) { meterCtx.close().catch(() => {}); meterCtx = null; }
-        if (volumeAnimFrame) { cancelAnimationFrame(volumeAnimFrame); volumeAnimFrame = null; }
-        if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
-        analyser = null;
+        cleanupAudioPipeline();
         isStreaming = false;
         document.getElementById('volumeBar').style.width = '0%';
         document.getElementById('volumeText').textContent = '0%';
@@ -366,24 +357,16 @@ function handleSignaling(msg) {
         setStatus('connected', '所有设备已断开，等待重新扫码...');
       }
       break;
+    }
 
     case 'peer-disconnected':
-      // 只清理连接，不停止音频流（保留 audioStream 供下次扫码复用）
-      if (processor) { processor.disconnect(); processor = null; }
-      if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
-      if (silentGain) { silentGain.disconnect(); silentGain = null; }
-      if (localAudioCtx) { localAudioCtx.close().catch(() => {}); localAudioCtx = null; }
-      if (meterCtx) { meterCtx.close().catch(() => {}); meterCtx = null; }
-      if (volumeAnimFrame) { cancelAnimationFrame(volumeAnimFrame); volumeAnimFrame = null; }
-      if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
-      analyser = null;
-      isStreaming = false;
-      relayEnabled = true;
-      // 清理所有 WebRTC 连接
       Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
       deviceList = {};
       deviceCounter = 0;
       updateDeviceList();
+      cleanupAudioPipeline();
+      isStreaming = false;
+      relayEnabled = true;
       document.getElementById('volumeBar').style.width = '0%';
       document.getElementById('volumeText').textContent = '0%';
       document.getElementById('btnStop').classList.add('hidden');
@@ -417,77 +400,53 @@ function updateDeviceList() {
 }
 
 // --- WebRTC P2P ---
-let p2pCtx = null;
-let p2pDest = null;
-
-function ensureP2PAudioSource() {
-  // 每次重建 p2pCtx/p2pDest，确保 track 状态新鲜
-  // 但只保留一个实例以避免 Chrome 限制
-  if (p2pCtx) {
-    try { p2pCtx.close().catch(() => {}); } catch (_) {}
-  }
-  p2pCtx = null;
-  p2pDest = null;
-  if (!audioStream) return false;
-  try {
-    p2pCtx = new AudioContext();
-    p2pDest = p2pCtx.createMediaStreamDestination();
-    const p2pSource = p2pCtx.createMediaStreamSource(audioStream);
-    p2pSource.connect(p2pDest);
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
+// 每个 P2P 连接独立 AudioContext
 function startP2P(deviceId) {
   if (peerConnections[deviceId]) return;
-
-  // 确保 P2P 音频源有效
-  ensureP2PAudioSource();
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   peerConnections[deviceId] = pc;
 
-  if (p2pDest) {
-    const webrtcTrack = p2pDest.stream.getAudioTracks()[0];
-    if (webrtcTrack) {
-      pc.addTrack(webrtcTrack, p2pDest.stream);
-    }
+  // 创建独立 P2P 音频源
+  if (audioStream) {
+    try {
+      const ctx = new AudioContext();
+      const dest = ctx.createMediaStreamDestination();
+      const source = ctx.createMediaStreamSource(audioStream);
+      source.connect(dest);
+      pc._p2pCtx = ctx;
+      pc._p2pDest = dest;
+      const track = dest.stream.getAudioTracks()[0];
+      if (track) pc.addTrack(track, dest.stream);
+    } catch (_) {}
   } else if (localAudioTrack) {
     pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
   }
 
-  // ICE candidate -> server -> receiver
   pc.onicecandidate = (e) => {
     if (e.candidate && ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'webrtc-ice', targetReceiverId: deviceId, candidate: e.candidate.toJSON() }));
     }
   };
 
-  // Connection state
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
       updateDeviceMode(deviceId, 'p2p');
-      // P2P 成功，关闭此设备的中继
       updateRelayState();
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
       updateDeviceMode(deviceId, 'relay');
-      // P2P 失败，确保此设备走中继
       relayEnabled = true;
       updateRelayState();
       cleanupPeerConnection(deviceId);
     }
   };
 
-  // Create offer
   pc.createOffer().then(offer => {
     return pc.setLocalDescription(offer);
   }).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, sdp: pc.localDescription.toJSON() }));
     }
-    // Fallback: if P2P doesn't connect in time, use relay
     setTimeout(() => {
       if (deviceList[deviceId] && deviceList[deviceId].mode === 'connecting') {
         updateDeviceMode(deviceId, 'relay');
@@ -498,6 +457,7 @@ function startP2P(deviceId) {
   }).catch(() => {
     updateDeviceMode(deviceId, 'relay');
     updateRelayState();
+    cleanupPeerConnection(deviceId);
   });
 }
 
@@ -509,8 +469,6 @@ function updateDeviceMode(deviceId, mode) {
 }
 
 function updateRelayState() {
-  // 中继关闭条件：所有设备都已成功 P2P
-  // 中继开启条件：至少一个设备是 relay 状态
   const entries = Object.values(deviceList);
   if (entries.length === 0) return;
   const allP2P = entries.every(d => d.mode === 'p2p');
@@ -525,14 +483,14 @@ function updateRelayState() {
 function cleanupPeerConnection(deviceId) {
   const pc = peerConnections[deviceId];
   if (pc) {
+    if (pc._p2pCtx) { try { pc._p2pCtx.close().catch(() => {}); } catch(_) {} }
     pc.close();
     delete peerConnections[deviceId];
   }
 }
 
-// --- 提前请求音频权限（创建房间前调用） ---
+// --- 提前请求音频权限 ---
 async function requestAudioSource() {
-  // 已有音频流则直接复用，不再弹窗
   if (audioStream && localAudioTrack && localAudioTrack.readyState === 'live') {
     return true;
   }
@@ -570,23 +528,40 @@ async function requestAudioSource() {
     return false;
   }
 }
-// --- 开始推流（音频已就绪，直接建立管线） ---
-async function autoStartStreaming() {
-  if (!audioStream) {
-    // 兜底：音频还没准备好重新请求
-    const ok = await requestAudioSource();
-    if (!ok) return;
+
+// --- 辅助 ---
+function cleanupAudioPipeline() {
+  if (processor) { processor.disconnect(); processor = null; }
+  if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+  if (silentGain) { silentGain.disconnect(); silentGain = null; }
+  if (localAudioCtx) { localAudioCtx.close().catch(() => {}); localAudioCtx = null; }
+  if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
+}
+
+async function ensureAudioStream() {
+  if (audioStream) {
+    const tracks = audioStream.getAudioTracks();
+    if (tracks.length > 0 && tracks[0].readyState === 'live') {
+      localAudioTrack = tracks[0];
+      return true;
+    }
+    audioStream.getTracks().forEach(t => t.stop());
+    audioStream = null;
+    localAudioTrack = null;
   }
+  return await requestAudioSource();
+}
+
+// --- 开始推流 ---
+async function autoStartStreaming() {
+  const audioOk = await ensureAudioStream();
+  if (!audioOk) return;
 
   try {
-    // AudioContext
     localAudioCtx = new AudioContext();
     const sampleRate = localAudioCtx.sampleRate;
-
-    // Send metadata
     ws.send(JSON.stringify({ type: 'audio-meta', sampleRate, channels: 1 }));
 
-    // Audio pipeline
     sourceNode = localAudioCtx.createMediaStreamSource(audioStream);
     processor = localAudioCtx.createScriptProcessor(2048, 1, 1);
     silentGain = localAudioCtx.createGain();
@@ -596,42 +571,37 @@ async function autoStartStreaming() {
     processor.connect(silentGain);
     silentGain.connect(localAudioCtx.destination);
 
-    // Volume meter (separate context to avoid gain=0)
-    meterCtx = new AudioContext();
-    const meterSource = meterCtx.createMediaStreamSource(audioStream);
-    analyser = meterCtx.createAnalyser();
-    analyser.fftSize = 256;
-    meterSource.connect(analyser);
-    updateVolume();
+    // 初始化柱状波
+    const waveContainer = document.getElementById('waveContainer');
+    waveContainer.innerHTML = '';
+    for (let i = 0; i < 32; i++) {
+      const bar = document.createElement('div');
+      bar.className = 'wave-bar';
+      bar.style.height = '4px';
+      waveContainer.appendChild(bar);
+    }
 
     streamStartTime = Date.now();
     relayEnabled = true;
 
     processor.onaudioprocess = (e) => {
       if (ws.readyState !== 1) return;
-      if (!relayEnabled) return; // Skip relay when all receivers are P2P
+      if (!relayEnabled) return;
+      if (ws.bufferedAmount > 1048576) return;
+
       const inputData = e.inputBuffer.getChannelData(0);
       const int16Data = new Int16Array(inputData.length);
       for (let i = 0; i < inputData.length; i++) {
         const s = Math.max(-1, Math.min(1, inputData[i]));
         int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       }
-      try {
-        ws.send(int16Data.buffer);
-      } catch (_) {}
+      ws.send(int16Data.buffer);
     };
 
     isStreaming = true;
     document.getElementById('btnStop').classList.remove('hidden');
     const conns = document.getElementById('connCount').textContent;
     setStatus('streaming', '正在推流 🎵 (' + conns + ' 个设备)');
-
-    // Duration counter
-    durationInterval = setInterval(() => {
-      const elapsed = Math.round((Date.now() - streamStartTime) / 1000);
-      const m = Math.floor(elapsed / 60);
-      const s = elapsed % 60;
-    }, 1000);
 
   } catch (err) {
     if (err.name === 'NotAllowedError') {
@@ -644,42 +614,24 @@ async function autoStartStreaming() {
 }
 
 function stopStreaming() {
-  if (processor) { processor.disconnect(); processor = null; }
-  if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
-  if (silentGain) { silentGain.disconnect(); silentGain = null; }
+  cleanupAudioPipeline();
   if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
-  if (localAudioCtx) { localAudioCtx.close().catch(() => {}); localAudioCtx = null; }
-  if (meterCtx) { meterCtx.close().catch(() => {}); meterCtx = null; }
-  if (volumeAnimFrame) { cancelAnimationFrame(volumeAnimFrame); volumeAnimFrame = null; }
-  if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
-  analyser = null;
   isStreaming = false;
   relayEnabled = true;
   localAudioTrack = null;
 
-  // 清理 P2P 共用 AudioContext
-  if (p2pCtx) { p2pCtx.close().catch(() => {}); p2pCtx = null; p2pDest = null; }
-
-  // Cleanup all WebRTC peer connections
   Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
+  Object.keys(peerConnections).forEach(id => {
+    const pc = peerConnections[id];
+    if (pc) { if (pc._p2pCtx) { try { pc._p2pCtx.close(); } catch(_) {} } pc.close(); }
+  });
+  peerConnections = {};
 
   document.getElementById('volumeBar').style.width = '0%';
   document.getElementById('volumeText').textContent = '0%';
   document.getElementById('btnStop').classList.add('hidden');
   setStatus('connected', '已停止推流');
 }
-
-function updateVolume() {
-  if (!analyser) return;
-  const data = new Uint8Array(analyser.frequencyBinCount);
-  analyser.getByteFrequencyData(data);
-  const avg = data.reduce((a, b) => a + b, 0) / data.length;
-  const pct = Math.min(100, (avg / 128) * 100);
-  document.getElementById('volumeBar').style.width = pct + '%';
-  document.getElementById('volumeText').textContent = Math.round(pct) + '%';
-  volumeAnimFrame = requestAnimationFrame(updateVolume);
-}
-
 
 function setStatus(state, text) {
   const dot = document.getElementById('statusDot');
