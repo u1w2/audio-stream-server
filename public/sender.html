@@ -176,24 +176,6 @@
 
     <button class="btn btn-danger" id="btnStop" onclick="stopStreaming()">⏹ 停止推流</button>
 
-    <div class="stats" id="statsPanel">
-      <div class="stat-item">
-        <div class="stat-value" id="statChunks">0</div>
-        <div class="stat-label">已发数据块</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-value" id="statBytes">0</div>
-        <div class="stat-label">已发数据</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-value" id="statSampleRate">--</div>
-        <div class="stat-label">采样率</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-value" id="statDuration">0s</div>
-        <div class="stat-label">推流时长</div>
-      </div>
-    </div>
   </div>
 
   <div class="tip" id="tipBox">
@@ -213,8 +195,6 @@ let volumeAnimFrame = null;
 let processor = null;
 let sourceNode = null;
 let silentGain = null;
-let chunkCount = 0;
-let totalBytes = 0;
 let streamStartTime = 0;
 let durationInterval = null;
 let isStreaming = false;
@@ -638,8 +618,6 @@ async function autoStartStreaming() {
     meterSource.connect(analyser);
     updateVolume();
 
-    chunkCount = 0;
-    totalBytes = 0;
     streamStartTime = Date.now();
     relayEnabled = true;
 
@@ -654,14 +632,6 @@ async function autoStartStreaming() {
       }
       try {
         ws.send(int16Data.buffer);
-        chunkCount++;
-        totalBytes += int16Data.buffer.byteLength;
-        if (chunkCount % 20 === 0) {
-          document.getElementById('statChunks').textContent = chunkCount;
-          document.getElementById('statBytes').textContent = formatBytes(totalBytes);
-          document.getElementById('statSampleRate').textContent = sampleRate + 'Hz';
-        }
-      } catch (_) {}
     };
 
     isStreaming = true;
@@ -674,7 +644,6 @@ async function autoStartStreaming() {
       const elapsed = Math.round((Date.now() - streamStartTime) / 1000);
       const m = Math.floor(elapsed / 60);
       const s = elapsed % 60;
-      document.getElementById('statDuration').textContent = m > 0 ? m + 'm' + s + 's' : s + 's';
     }, 1000);
 
   } catch (err) {
@@ -724,11 +693,6 @@ function updateVolume() {
   volumeAnimFrame = requestAnimationFrame(updateVolume);
 }
 
-function formatBytes(b) {
-  if (b < 1024) return b + ' B';
-  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
-  return (b / 1048576).toFixed(1) + ' MB';
-}
 
 function setStatus(state, text) {
   const dot = document.getElementById('statusDot');

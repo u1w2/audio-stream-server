@@ -137,24 +137,6 @@
 
     <div class="wave-container hidden" id="waveContainer"></div>
 
-    <div class="stats hidden" id="statsPanel">
-      <div class="stat-item">
-        <div class="stat-value" id="statChunks">0</div>
-        <div class="stat-label">已收数据块</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-value" id="statBytes">0</div>
-        <div class="stat-label">已收数据</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-value" id="statSampleRate">--</div>
-        <div class="stat-label">采样率</div>
-      </div>
-      <div class="stat-item">
-        <div class="stat-value" id="statLatency">--</div>
-        <div class="stat-label">缓冲延迟</div>
-      </div>
-    </div>
   </div>
 
   <div class="tip">💡 点击按钮即可开始收听。请确保手机音量已打开。</div>
@@ -172,8 +154,6 @@ let p2pAnalyseCtx = null;
 let p2pAnalyseSource = null;
 let p2pAnalyser = null;
 let isPlaying = false;
-let chunkCount = 0;
-let totalBytes = 0;
 let remoteSampleRate = 48000;
 let ringBuffer = null;
 let bufferWritePos = 0;
@@ -313,7 +293,6 @@ function handleSignaling(msg) {
 
     case 'audio-meta':
       remoteSampleRate = msg.sampleRate || 48000;
-      document.getElementById('statSampleRate').textContent = remoteSampleRate + 'Hz';
 
       if (userActivated && audioContext && audioContext.state === 'running') {
         document.getElementById('playBtn').disabled = false;
@@ -399,9 +378,6 @@ function handleWebRTCOffer(msg) {
         reportConnStatus('relay');
         document.getElementById('playHint').textContent = 'P2P 断开，切换至中继...';
         setStatus('playing', '中继播放 🎵');
-        document.getElementById('statChunks').textContent = chunkCount;
-        document.getElementById('statBytes').textContent = formatBytes(totalBytes);
-        document.getElementById('statLatency').textContent = Math.round((samplesBuffered / remoteSampleRate) * 1000) + 'ms';
       } else if (!playbackStarted) {
         reportConnStatus('relay');
       }
@@ -449,11 +425,7 @@ function startP2PPlayback() {
   document.getElementById('playBtn').disabled = false;
   document.getElementById('playHint').textContent = 'P2P 直连播放中';
   document.getElementById('volumeDisplay').classList.remove('hidden');
-  document.getElementById('statsPanel').classList.remove('hidden');
   // P2P stats — show P2P label instead of relay data
-  document.getElementById('statChunks').textContent = 'P2P';
-  document.getElementById('statBytes').textContent = '直连';
-  document.getElementById('statLatency').textContent = '<5ms';
   setStatus('playing', 'P2P 直连 🎵');
 }
 
@@ -505,13 +477,7 @@ function handleAudioData(arrayBuffer) {
   }
 
   samplesBuffered += float32.length;
-  chunkCount++;
-  totalBytes += arrayBuffer.byteLength;
 
-  if (chunkCount % 20 === 0) {
-    document.getElementById('statChunks').textContent = chunkCount;
-    document.getElementById('statBytes').textContent = formatBytes(totalBytes);
-  }
 
   if (userActivated && !playbackStarted && audioContext && audioContext.state === 'running') {
     const needed = remoteSampleRate * (INITIAL_BUFFER_MS / 1000);
@@ -613,7 +579,6 @@ function startPlayback() {
   document.getElementById('playBtn').classList.add('playing');
   document.getElementById('playHint').textContent = '正在播放';
   document.getElementById('volumeDisplay').classList.remove('hidden');
-  document.getElementById('statsPanel').classList.remove('hidden');
   setStatus('playing', '正在播放 🎵');
 }
 
@@ -640,7 +605,6 @@ function stopPlayback() {
   document.getElementById('playBtn').disabled = true;
   document.getElementById('playHint').textContent = '等待音频...';
   document.getElementById('volumeDisplay').classList.add('hidden');
-  document.getElementById('statsPanel').classList.add('hidden');
   document.getElementById('waveContainer').classList.add('hidden');
   setStatus('connected', '已停止');
 }
@@ -664,16 +628,10 @@ function updateVolume() {
   });
 
   const bufferedMs = Math.round((samplesBuffered / remoteSampleRate) * 1000);
-  document.getElementById('statLatency').textContent = bufferedMs + 'ms';
 
   volumeAnimFrame = requestAnimationFrame(updateVolume);
 }
 
-function formatBytes(b) {
-  if (b < 1024) return b + ' B';
-  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
-  return (b / 1048576).toFixed(1) + ' MB';
-}
 
 function reportConnStatus(mode) {
   // mode: 'p2p' or 'relay'
