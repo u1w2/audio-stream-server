@@ -423,9 +423,14 @@ function startP2P(deviceId) {
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   peerConnections[deviceId] = pc;
 
-  // Add local audio track
-  if (localAudioTrack && audioStream) {
-    pc.addTrack(localAudioTrack, audioStream);
+  // Add local audio track via transceiver (more reliable than addTrack)
+  if (localAudioTrack) {
+    try {
+      pc.addTransceiver(localAudioTrack, { direction: 'sendonly', streams: [audioStream] });
+    } catch (_) {
+      // Fallback for older browsers
+      pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
+    }
   }
 
   // ICE candidate -> server -> receiver

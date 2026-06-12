@@ -364,16 +364,12 @@ function handleWebRTCOffer(msg) {
     p2pMode = true;
     reportConnStatus('p2p');
 
-    // If user already started playback, redirect to P2P stream
+    // Start P2P playback immediately regardless of user activation
+    // The audio stream is from a remote track — no user gesture needed
     if (playbackStarted) {
-      // Stop relay-based playback and restart with P2P stream
       stopRelayPlayback();
-      startP2PPlayback();
-    } else if (userActivated && audioContext && audioContext.state === 'running') {
-      // Audio context is active but playback hasn't started yet
-      document.getElementById('playHint').textContent = '缓冲中 (P2P)...';
     }
-  };
+    startP2PPlayback();
 
   p2pPC.onicecandidate = (e) => {
     if (e.candidate && ws.readyState === 1) {
