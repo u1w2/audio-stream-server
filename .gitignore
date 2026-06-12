@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+debug-*.log
+.env
+.env.local
+.DS_Store
+Thumbs.db
+.workbuddy/
+ffmpeg/
+vbcable/
+vbcable.zip
+nul
+stereo_test_err.txt
+test-ws.js

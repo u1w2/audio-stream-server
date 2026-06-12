@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>扫码连接 - 音频流</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center;
+      justify-content: center; padding: 20px; color: white;
+    }
+    .container { text-align: center; max-width: 500px; width: 100%; }
+    .logo {
+      width: 100px; height: 100px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 25px; margin: 0 auto 30px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 40px; box-shadow: 0 10px 40px rgba(102, 126, 234, 0.4);
+    }
+    h1 { font-size: 32px; margin-bottom: 10px; font-weight: 700; }
+    .subtitle { font-size: 16px; color: rgba(255,255,255,0.7); margin-bottom: 40px; }
+    .qrcode-container {
+      background: white; border-radius: 20px; padding: 25px;
+      display: inline-block; box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+      margin-bottom: 30px;
+    }
+    .qrcode-container img { display: block; }
+    .url-display {
+      background: rgba(255,255,255,0.1); border-radius: 12px;
+      padding: 15px 20px; margin-bottom: 20px;
+      word-break: break-all; font-family: 'Courier New', monospace;
+      font-size: 14px; color: rgba(255,255,255,0.9);
+    }
+    .btn {
+      background: rgba(255,255,255,0.15); border: none; color: white;
+      padding: 10px 20px; border-radius: 8px; cursor: pointer;
+      font-size: 14px; transition: all 0.3s ease; margin: 5px;
+    }
+    .btn:hover { background: rgba(255,255,255,0.25); }
+    .btn-large {
+      padding: 15px 40px; font-size: 18px; margin-top: 20px;
+    }
+    .info-box {
+      display: flex; align-items: center; justify-content: center; gap: 12px;
+      margin-bottom: 15px; color: rgba(255,255,255,0.8); font-size: 14px;
+    }
+    .info-box svg { width: 20px; height: 20px; }
+    .setup-box {
+      text-align: left;
+      background: rgba(102, 126, 234, 0.15);
+      border: 1px solid rgba(102, 126, 234, 0.35);
+      border-radius: 12px;
+      padding: 16px 18px;
+      margin-bottom: 24px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: rgba(255,255,255,0.88);
+    }
+    .setup-box strong { color: #a5b4fc; }
+    .setup-box ol { margin: 8px 0 0 18px; }
+    .stats {
+      display: flex; justify-content: center; gap: 40px;
+      margin-top: 30px; padding-top: 30px;
+      border-top: 1px solid rgba(255,255,255,0.1);
+    }
+    .stat-item { text-align: center; }
+    .stat-value { font-size: 32px; font-weight: 700; color: #667eea; }
+    .stat-label { font-size: 12px; color: rgba(255,255,255,0.6); margin-top: 5px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">🔊</div>
+    <h1>音频流服务</h1>
+    <p class="subtitle">手机扫码连接，实时收听电脑声音</p>
+
+    <div class="setup-box">
+      <strong>自动捕获当前正在播放的系统声音</strong>
+      <ol>
+        <li>优先使用 <strong>WASAPI 环回</strong>，跟随 Windows 默认输出（扬声器/耳机/蓝牙均可）</li>
+        <li>无需切换 VB-CABLE，也无需改播放设备</li>
+        <li>若 WASAPI 不可用，会回退到「立体声混音」或 VB-CABLE</li>
+      </ol>
+    </div>
+    
+    <div class="qrcode-container">
+      <img id="qrcode" alt="二维码正在生成..." width="256" height="256">
+    </div>
+    
+    <div class="url-display" id="urlDisplay">加载中...</div>
+    
+    <button class="btn" id="openBtn">打开播放页</button>
+    
+    <div class="info-box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="3" width="7" height="7"/>
+        <rect x="14" y="3" width="7" height="7"/>
+        <rect x="14" y="14" width="7" height="7"/>
+        <rect x="3" y="14" width="7" height="7"/>
+      </svg>
+      <span>扫描上方二维码，或点击按钮打开播放页</span>
+    </div>
+    
+    <div class="stats">
+      <div class="stat-item">
+        <div class="stat-value" id="connectionCount">0</div>
+        <div class="stat-label">在线连接</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="captureStatus">运行中</div>
+        <div class="stat-label">捕获状态</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const qrcodeImg = document.getElementById('qrcode');
+    const urlDisplay = document.getElementById('urlDisplay');
+    const openBtn = document.getElementById('openBtn');
+    const connectionCount = document.getElementById('connectionCount');
+
+    const playUrl = window.location.origin + '/play';
+    urlDisplay.textContent = playUrl;
+    
+    const qrcodeAPIs = [
+      'https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=',
+      'https://qr.limiwu.com/?size=256&text='
+    ];
+    
+    function loadQRCode(apiIndex) {
+      if (apiIndex >= qrcodeAPIs.length) {
+        qrcodeImg.alt = '二维码生成失败，请点击按钮打开';
+        urlDisplay.innerHTML = playUrl + '<br><small style="color:#e74c3c">二维码服务不可用，请直接点击下方按钮</small>';
+        return;
+      }
+      
+      qrcodeImg.src = qrcodeAPIs[apiIndex] + encodeURIComponent(playUrl);
+      qrcodeImg.onerror = function() {
+        loadQRCode(apiIndex + 1);
+      };
+    }
+    
+    loadQRCode(0);
+
+    openBtn.addEventListener('click', () => {
+      window.location.href = playUrl;
+    });
+
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${location.host}/ws?stats=true`;
+    const ws = new WebSocket(wsUrl);
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'stats' && data.connections !== undefined) {
+          connectionCount.textContent = data.connections;
+        }
+      } catch (e) {}
+    };
+    ws.onclose = () => {
+      setTimeout(() => {
+        const retryWs = new WebSocket(wsUrl);
+        retryWs.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'stats' && data.connections !== undefined) {
+              connectionCount.textContent = data.connections;
+            }
+          } catch (e) {}
+        };
+      }, 2000);
+    };
+  </script>
+</body>
+</html>

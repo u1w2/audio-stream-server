@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>音频流播放器</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      background: white; border-radius: 20px; padding: 40px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      text-align: center; max-width: 400px; width: 100%;
+    }
+    .logo {
+      width: 80px; height: 80px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 20px; margin: 0 auto 20px;
+      display: flex; align-items: center; justify-content: center;
+      color: white; font-size: 32px;
+    }
+    h1 { color: #333; margin-bottom: 10px; font-size: 24px; }
+    .status { margin-bottom: 30px; }
+    .status-text { font-size: 14px; color: #666; margin-bottom: 10px; }
+    .status-indicator {
+      width: 12px; height: 12px; border-radius: 50%; margin: 0 auto;
+      transition: all 0.3s ease;
+    }
+    .status-indicator.disconnected { background: #e74c3c; }
+    .status-indicator.connecting { background: #f39c12; animation: pulse 1s infinite; }
+    .status-indicator.connected { background: #27ae60; animation: pulse 1.5s infinite; }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(39, 174, 96, 0.7); }
+      50% { box-shadow: 0 0 0 10px rgba(39, 174, 96, 0); }
+    }
+    .btn {
+      width: 100%; padding: 15px; border: none; border-radius: 12px;
+      font-size: 16px; font-weight: 600; cursor: pointer;
+      transition: all 0.3s ease; margin-bottom: 15px;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4); }
+    .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+    .btn-secondary { background: #f8f9fa; color: #333; }
+    .btn-secondary:hover { background: #e9ecef; }
+    .info { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 10px; font-size: 12px; color: #666; text-align: left; }
+    .info p { margin-bottom: 5px; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">🔊</div>
+    <h1>音频流播放器</h1>
+    
+    <div class="status">
+      <div class="status-text" id="statusText">已断开连接</div>
+      <div class="status-indicator disconnected" id="statusIndicator"></div>
+    </div>
+    
+    <button class="btn btn-primary" id="connectBtn">🔊 连接音频流</button>
+    <button class="btn btn-secondary" id="disconnectBtn" disabled>⏹️ 断开连接</button>
+    
+    <div class="info">
+      <p><strong>状态:</strong></p>
+      <p id="statusInfo">等待连接...</p>
+      <p id="bufferInfo">缓冲区: 0 bytes</p>
+    </div>
+  </div>
+
+  <script>
+    const SRC_SAMPLE_RATE = 48000;
+    const SCRIPT_BUFFER_SIZE = 2048;
+    const MIN_PREROLL_BYTES = 192000;
+    const MAX_BUFFER_BYTES = 576000;
+    const MIN_FRAMES_AHEAD = SCRIPT_BUFFER_SIZE + 512;
+
+    let audioContext = null;
+    let ws = null;
+    let scriptNode = null;
+    let audioBuffer = new Uint8Array(0);
+    let isStreaming = false;
+    let isConnecting = false;
+    let pcmReadPos = 0;
+    let lastSampleL = 0;
+    let lastSampleR = 0;
+    let totalReceivedBytes = 0;
+
+    const statusText = document.getElementById('statusText');
+    const statusIndicator = document.getElementById('statusIndicator');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const statusInfo = document.getElementById('statusInfo');
+    const bufferInfo = document.getElementById('bufferInfo');
+
+    function updateStatus(text, statusClass) {
+      statusText.textContent = text;
+      statusIndicator.className = 'status-indicator ' + statusClass;
+    }
+
+    function resetStreamState() {
+      audioBuffer = new Uint8Array(0);
+      pcmReadPos = 0;
+      lastSampleL = 0;
+      lastSampleR = 0;
+      totalReceivedBytes = 0;
+    }
+
+    function readStereoFrameFromBuffer(buf, frameIndex) {
+      const byteOffset = frameIndex * 4;
+      if (byteOffset + 3 >= buf.length) {
+        return [0, 0];
+      }
+      const view = new DataView(buf.buffer, buf.byteOffset + byteOffset, 4);
+      return [
+        view.getInt16(0, true) / 32768.0,
+        view.getInt16(2, true) / 32768.0,
+      ];
+    }
+
+    function trimConsumedBuffer() {
+      const consumedFrames = Math.floor(pcmReadPos);
+      if (consumedFrames < 512) return;
+
+      const consumedBytes = consumedFrames * 4;
+      audioBuffer = audioBuffer.slice(consumedBytes);
+      pcmReadPos -= consumedFrames;
+    }
+
+    function appendAudioBytes(bytes) {
+      const incoming = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      if (incoming.length === 0) return;
+
+      const merged = new Uint8Array(audioBuffer.length + incoming.length);
+      merged.set(audioBuffer);
+      merged.set(incoming, audioBuffer.length);
+      audioBuffer = merged;
+      totalReceivedBytes += incoming.length;
+
+      if (audioBuffer.length > MAX_BUFFER_BYTES) {
+        const dropBytes = audioBuffer.length - MAX_BUFFER_BYTES / 2;
+        audioBuffer = audioBuffer.slice(dropBytes);
+        pcmReadPos = Math.max(0, pcmReadPos - dropBytes / 4);
+      }
+
+      const totalFrames = audioBuffer.length / 4;
+      if (pcmReadPos >= totalFrames || pcmReadPos > totalFrames - SCRIPT_BUFFER_SIZE) {
+        pcmReadPos = 0;
+      }
+
+      bufferInfo.textContent = '缓冲区: ' + audioBuffer.length + ' bytes';
+    }
+
+    function startStreamPlayer() {
+      if (scriptNode || !audioContext) return;
+
+      const node = audioContext.createScriptProcessor(SCRIPT_BUFFER_SIZE, 0, 2);
+      scriptNode = node;
+      isStreaming = true;
+
+      node.onaudioprocess = function (event) {
+        const left = event.outputBuffer.getChannelData(0);
+        const right = event.outputBuffer.getChannelData(1);
+        const outRate = audioContext.sampleRate;
+        const step = SRC_SAMPLE_RATE / outRate;
+        const bufSnapshot = audioBuffer;
+        const totalFrames = bufSnapshot.length / 4;
+        let localReadPos = pcmReadPos;
+        const readIdx = Math.floor(localReadPos);
+        const readableFrames = totalFrames - readIdx;
+
+        if (readableFrames <= 0) {
+          for (let i = 0; i < left.length; i++) {
+            left[i] = lastSampleL;
+            right[i] = lastSampleR;
+          }
+          updateStatus('缓冲中…', 'connecting');
+          statusInfo.textContent = '已接收 ' + totalReceivedBytes + ' bytes，等待缓冲';
+          return;
+        }
+
+        for (let i = 0; i < left.length; i++) {
+          const i0 = Math.floor(localReadPos);
+          if (i0 + 1 >= totalFrames) {
+            left[i] = lastSampleL;
+            right[i] = lastSampleR;
+          } else {
+            const frac = localReadPos - i0;
+            const s0 = readStereoFrameFromBuffer(bufSnapshot, i0);
+            const s1 = readStereoFrameFromBuffer(bufSnapshot, i0 + 1);
+            left[i] = s0[0] + (s1[0] - s0[0]) * frac;
+            right[i] = s0[1] + (s1[1] - s0[1]) * frac;
+            lastSampleL = left[i];
+            lastSampleR = right[i];
+            localReadPos += step;
+          }
+        }
+
+        pcmReadPos = localReadPos;
+        trimConsumedBuffer();
+
+        updateStatus('正在播放', 'connected');
+        statusInfo.textContent = '已接收 ' + totalReceivedBytes + ' bytes，流式播放中';
+      };
+
+      node.connect(audioContext.destination);
+    }
+
+    function stopStreamPlayer() {
+      if (scriptNode) {
+        scriptNode.disconnect();
+        scriptNode.onaudioprocess = null;
+        scriptNode = null;
+      }
+      isStreaming = false;
+    }
+
+    async function initAudioContext() {
+      if (!audioContext) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        audioContext = new AudioCtx();
+      }
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+      }
+    }
+
+    function handleMessage(event) {
+      try {
+        if (typeof event.data === 'string') {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === 'stats') return;
+          } catch (e) {}
+          return;
+        }
+
+        let bytes;
+        if (event.data instanceof ArrayBuffer) {
+          bytes = new Uint8Array(event.data);
+        } else if (event.data instanceof Blob) {
+          event.data.arrayBuffer().then(function (ab) {
+            handleBinaryMessage(new Uint8Array(ab));
+          });
+          return;
+        } else {
+          return;
+        }
+
+        handleBinaryMessage(bytes);
+      } catch (e) {
+        statusInfo.textContent = '处理数据错误: ' + e.message;
+      }
+    }
+
+    function handleBinaryMessage(bytes) {
+      appendAudioBytes(bytes);
+
+      if (!isStreaming && audioBuffer.length >= MIN_PREROLL_BYTES) {
+        const framesAvailable = audioBuffer.length / 4;
+        if (framesAvailable >= MIN_FRAMES_AHEAD) {
+          startStreamPlayer();
+        }
+      }
+    }
+
+    async function connect() {
+      if (isConnecting || (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) {
+        return;
+      }
+      isConnecting = true;
+      connectBtn.disabled = true;
+
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      stopStreamPlayer();
+      resetStreamState();
+
+      try {
+        await initAudioContext();
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = protocol + '//' + window.location.host + '/ws';
+
+        statusInfo.textContent = '连接中: ' + wsUrl;
+        updateStatus('连接中...', 'connecting');
+
+        ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+          isConnecting = false;
+          updateStatus('已连接，等待音频数据...', 'connected');
+          disconnectBtn.disabled = false;
+        };
+
+        ws.onmessage = handleMessage;
+
+        ws.onerror = () => {
+          statusInfo.textContent = 'WebSocket错误';
+          updateStatus('连接错误', 'disconnected');
+        };
+
+        ws.onclose = () => {
+          isConnecting = false;
+          updateStatus('已断开', 'disconnected');
+          connectBtn.disabled = false;
+          disconnectBtn.disabled = true;
+          stopStreamPlayer();
+          resetStreamState();
+        };
+      } catch (error) {
+        isConnecting = false;
+        connectBtn.disabled = false;
+        statusInfo.textContent = '错误: ' + error.message;
+        updateStatus('连接失败', 'disconnected');
+      }
+    }
+
+    function disconnect() {
+      isConnecting = false;
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      stopStreamPlayer();
+      resetStreamState();
+    }
+
+    connectBtn.addEventListener('click', connect);
+    disconnectBtn.addEventListener('click', disconnect);
+  </script>
+</body>
+</html>
