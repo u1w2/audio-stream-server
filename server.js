@@ -125,9 +125,9 @@ wss.on('connection', (ws) => {
         currentRoom = code;
         currentRole = 'receiver';
         const count = room.receivers.length;
-        ws.send(JSON.stringify({ type: 'joined', code }));
+        ws.send(JSON.stringify({ type: 'joined', code, receiverIndex: count }));
         // Notify sender with connection count and room config
-        room.sender?.send(JSON.stringify({ type: 'peer-ready', connections: count }));
+        room.sender?.send(JSON.stringify({ type: 'peer-ready', connections: count, receiverIndex: count }));
         // Notify receiver of room mode
         ws.send(JSON.stringify({ type: 'room-config', p2pOnly: room.p2pOnly }));
         console.log(`[Room] Joined: ${code} (total receivers: ${count})`);

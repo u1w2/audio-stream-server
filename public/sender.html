@@ -304,10 +304,10 @@ function handleSignaling(msg) {
 
     case 'peer-ready':
       document.getElementById('connCount').textContent = msg.connections || 1;
-      // Add a new device entry (connecting)
+      // Add a new device entry with stable ID matching receiver
+      const devId = 'device-' + (msg.receiverIndex || (deviceCounter + 1));
       deviceCounter++;
-      const newDeviceId = 'device-' + deviceCounter;
-      deviceList[newDeviceId] = { num: deviceCounter, mode: 'connecting' };
+      deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
       updateDeviceList();
       if (!isStreaming) {
         setStatus('streaming', '设备已连接，正在请求音频权限...');
@@ -326,9 +326,9 @@ function handleSignaling(msg) {
 
     case 'connection-status':
       if (msg.receiverId && deviceList[msg.receiverId]) {
-        deviceList[msg.receiverId].mode = msg.mode; // 'p2p' or 'relay'
-        updateDeviceList();
+        deviceList[msg.receiverId].mode = msg.mode;
       }
+      updateDeviceList();
       break;
 
     case 'peer-left':

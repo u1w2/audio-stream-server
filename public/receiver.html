@@ -298,8 +298,8 @@ function handleSignaling(msg) {
       document.getElementById('actionArea').classList.add('hidden');
       document.getElementById('playArea').classList.remove('hidden');
       document.getElementById('displayCode').textContent = msg.code;
-      // Generate a unique receiver ID
-      myReceiverId = 'device-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      // Use server-assigned receiver index as our stable ID
+      myReceiverId = 'device-' + (msg.receiverIndex || Date.now().toString(36));
       setStatus('connected', '已连接，等待音频...');
       break;
 
@@ -372,9 +372,7 @@ function setupP2PAnalyser(msg) {
 function handleAudioData(arrayBuffer) {
   if (p2pMode) return; // Ignore relay data when P2P is active
 
-  if (!playbackStarted) {
-    reportConnStatus('relay');
-  }
+  reportConnStatus('relay');
 
   const int16 = new Int16Array(arrayBuffer);
   const float32 = new Float32Array(int16.length);
