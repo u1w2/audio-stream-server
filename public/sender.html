@@ -510,6 +510,10 @@ function cleanupPeerConnection(deviceId) {
 
 // --- 提前请求音频权限（创建房间前调用） ---
 async function requestAudioSource() {
+  // 已有音频流则直接复用，不再弹窗
+  if (audioStream && localAudioTrack && localAudioTrack.readyState === 'live') {
+    return true;
+  }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
     alert('浏览器不支持音频捕获！\\n请使用 http://localhost 访问此页面。');
     setStatus('error', '浏览器不支持');

@@ -441,6 +441,10 @@ function startP2PPlayback() {
   document.getElementById('playHint').textContent = 'P2P 直连播放中';
   document.getElementById('volumeDisplay').classList.remove('hidden');
   document.getElementById('statsPanel').classList.remove('hidden');
+  // P2P stats — show P2P label instead of relay data
+  document.getElementById('statChunks').textContent = 'P2P';
+  document.getElementById('statBytes').textContent = '直连';
+  document.getElementById('statLatency').textContent = '<5ms';
   setStatus('playing', 'P2P 直连 🎵');
 }
 
