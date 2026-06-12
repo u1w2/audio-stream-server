@@ -156,7 +156,6 @@ let silentGain = null;
 let streamStartTime = 0;
 let durationInterval = null;
 let isStreaming = false;
-let relayEnabled = true;
 let deviceCounter = 0;
 let deviceList = {};
 
@@ -269,7 +268,6 @@ function handleSignaling(msg) {
         setStatus('streaming', '设备已连接，正在启动推流...');
         autoStartStreaming();
       } else {
-        relayEnabled = true;
         setStatus('streaming', '正在推流 🎵 (' + (msg.connections || 1) + ' 个设备)');
       }
       break;
@@ -324,7 +322,6 @@ function handleSignaling(msg) {
       deviceCounter = 0;
       updateDeviceList();
       isStreaming = false;
-      relayEnabled = true;
       document.getElementById('btnStop').classList.add('hidden');
       setStatus('connected', '设备已断开，等待重新扫码...');
       break;
@@ -394,11 +391,8 @@ function startP2P(deviceId) {
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
       updateDeviceMode(deviceId, 'p2p');
-      updateRelayState();
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
       updateDeviceMode(deviceId, 'relay');
-      relayEnabled = true;
-      updateRelayState();
       cleanupPeerConnection(deviceId);
     }
   };
@@ -412,13 +406,11 @@ function startP2P(deviceId) {
     setTimeout(() => {
       if (deviceList[deviceId] && deviceList[deviceId].mode === 'connecting') {
         updateDeviceMode(deviceId, 'relay');
-        updateRelayState();
         cleanupPeerConnection(deviceId);
       }
     }, P2P_TIMEOUT);
   }).catch(() => {
     updateDeviceMode(deviceId, 'relay');
-    updateRelayState();
     cleanupPeerConnection(deviceId);
   });
 }
@@ -428,11 +420,6 @@ function updateDeviceMode(deviceId, mode) {
     deviceList[deviceId].mode = mode;
     updateDeviceList();
   }
-}
-
-function updateRelayState() {
-  // 永远保持 relay 开启，P2P 只是优化，不关中继
-  relayEnabled = true;
 }
 
 function cleanupPeerConnection(deviceId) {
@@ -527,11 +514,9 @@ async function autoStartStreaming() {
     silentGain.connect(localAudioCtx.destination);
 
     streamStartTime = Date.now();
-    relayEnabled = true;
 
     processor.onaudioprocess = (e) => {
       if (ws.readyState !== 1) return;
-      if (!relayEnabled) return;
       if (ws.bufferedAmount > 1048576) return;
 
       const inputData = e.inputBuffer.getChannelData(0);
@@ -562,7 +547,6 @@ function stopStreaming() {
   cleanupAudioPipeline();
   if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
   isStreaming = false;
-  relayEnabled = true;
   localAudioTrack = null;
 
   Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
