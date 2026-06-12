@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>音频播放 - Audio Stream Receiver</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0a0a0f; color: #e0e0e0;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    -webkit-user-select: none; user-select: none;
+  }
+  .container { max-width: 400px; width: 100%; padding: 32px 24px; text-align: center; }
+  h1 {
+    font-size: 24px; font-weight: 700; margin-bottom: 6px;
+    background: linear-gradient(135deg, #4ade80, #22d3ee);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .subtitle { color: #888; margin-bottom: 28px; font-size: 13px; }
+  .status-bar {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin-bottom: 24px; padding: 10px 16px;
+    background: rgba(255,255,255,0.05); border-radius: 10px; font-size: 13px;
+  }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #555; transition: background 0.3s;
+  }
+  .status-dot.connected { background: #4ade80; box-shadow: 0 0 6px #4ade8066; }
+  .status-dot.playing { background: #22d3ee; box-shadow: 0 0 6px #22d3ee66; animation: pulse 1.5s infinite; }
+  .status-dot.buffering { background: #f59e0b; box-shadow: 0 0 6px #f59e0b66; }
+  .status-dot.error { background: #ef4444; box-shadow: 0 0 6px #ef444466; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 14px 28px; border: none; border-radius: 14px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+    transition: all 0.2s; width: 100%;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn-connect { background: linear-gradient(135deg, #4ade80, #22d3ee); color: #0a0a0f; }
+  .btn-connect:hover { opacity: 0.9; }
+  .btn-connect:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .play-btn {
+    width: 120px; height: 120px; border-radius: 50%; border: none;
+    background: linear-gradient(135deg, #4ade80, #22d3ee); color: #0a0a0f;
+    font-size: 40px; cursor: pointer; transition: all 0.2s;
+    display: flex; align-items: center; justify-content: center;
+    margin: 28px auto; box-shadow: 0 0 40px rgba(74, 222, 128, 0.2);
+  }
+  .play-btn:hover { transform: scale(1.05); }
+  .play-btn:active { transform: scale(0.95); }
+  .play-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+  .play-btn.playing {
+    background: linear-gradient(135deg, #22d3ee, #667eea);
+    box-shadow: 0 0 40px rgba(34, 211, 238, 0.3);
+  }
+
+  .volume-display {
+    margin: 20px auto; padding: 16px;
+    background: rgba(255,255,255,0.03); border-radius: 12px;
+  }
+  .volume-bar-container {
+    height: 6px; background: rgba(255,255,255,0.1);
+    border-radius: 3px; overflow: hidden; margin-top: 8px;
+  }
+  .volume-bar {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, #4ade80, #22d3ee);
+    border-radius: 3px; transition: width 0.05s;
+  }
+
+  .wave-container {
+    height: 60px; margin: 20px 0;
+    display: flex; align-items: center; justify-content: center; gap: 3px;
+  }
+  .wave-bar {
+    width: 4px; background: linear-gradient(to top, #4ade80, #22d3ee);
+    border-radius: 2px; transition: height 0.08s;
+  }
+
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
+  .stat-item { background: rgba(255,255,255,0.03); border-radius: 10px; padding: 10px; }
+  .stat-value { font-size: 18px; font-weight: 700; color: #4ade80; }
+  .stat-label { font-size: 10px; color: #777; margin-top: 2px; text-transform: uppercase; }
+
+  .hidden { display: none !important; }
+
+  .tip {
+    margin-top: 24px; padding: 10px 14px;
+    background: rgba(74, 222, 128, 0.08); border-left: 3px solid #4ade80;
+    border-radius: 0 8px 8px 0; font-size: 12px; color: #8b9; text-align: left;
+  }
+
+  .log-area {
+    margin-top: 16px; padding: 12px; max-height: 150px; overflow-y: auto;
+    background: rgba(0,0,0,0.4); border-radius: 8px;
+    font-size: 10px; color: #666; text-align: left; font-family: monospace;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🎧 Audio Stream</h1>
+  <p class="subtitle">手机端播放</p>
+
+  <div class="status-bar">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="statusText">未连接</span>
+  </div>
+
+  <!-- Main action area -->
+  <div id="actionArea">
+    <!-- Will be dynamically populated -->
+  </div>
+
+  <!-- Playing area (shown during playback) -->
+  <div id="playArea" class="hidden">
+    <p style="color:#888; font-size:14px; margin-bottom:4px;">房间</p>
+    <p style="font-size:28px; font-weight:800; letter-spacing:8px; color:#4ade80;" id="displayCode"></p>
+
+    <button class="play-btn" id="playBtn" onclick="togglePlay()" disabled>▶</button>
+    <p style="color:#666; font-size:12px;" id="playHint">等待音频...</p>
+
+    <div class="volume-display hidden" id="volumeDisplay">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span style="font-size:12px; color:#aaa;">音量</span>
+        <span style="font-size:11px; color:#4ade80;" id="volumeText">0%</span>
+      </div>
+      <div class="volume-bar-container">
+        <div class="volume-bar" id="volumeBar"></div>
+      </div>
+    </div>
+
+    <div class="wave-container hidden" id="waveContainer"></div>
+
+    <div class="stats hidden" id="statsPanel">
+      <div class="stat-item">
+        <div class="stat-value" id="statChunks">0</div>
+        <div class="stat-label">已收数据块</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="statBytes">0</div>
+        <div class="stat-label">已收数据</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="statSampleRate">--</div>
+        <div class="stat-label">采样率</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="statLatency">--</div>
+        <div class="stat-label">缓冲延迟</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tip">💡 点击按钮即可开始收听。请确保手机音量已打开。</div>
+  <div class="log-area" id="logArea"></div>
+</div>
+
+<script>
+// --- State ---
+let ws = null;
+let roomCode = null;
+let audioContext = null;
+let processor = null;
+let analyser = null;
+let volumeAnimFrame = null;
+let isPlaying = false;
+let chunkCount = 0;
+let totalBytes = 0;
+let remoteSampleRate = 48000;
+let ringBuffer = null;
+let bufferWritePos = 0;
+let bufferReadPos = 0;
+const RING_BUFFER_SIZE = 48000 * 2;
+let samplesBuffered = 0;
+let playbackStarted = false;
+let userActivated = false;
+const INITIAL_BUFFER_MS = 150;
+
+// Store code from URL
+let pendingCode = null;
+
+function log(msg) {
+  const el = document.getElementById('logArea');
+  const time = new Date().toLocaleTimeString();
+  el.innerHTML += `<div>[${time}] ${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+  console.log('[Receiver]', msg);
+}
+
+// --- Initialize UI based on URL params ---
+const urlParams = new URLSearchParams(window.location.search);
+const preCode = urlParams.get('code');
+
+window.addEventListener('DOMContentLoaded', () => {
+  const actionArea = document.getElementById('actionArea');
+  if (preCode) {
+    // QR scan auto-join mode: show a big activation button
+    pendingCode = preCode.toUpperCase();
+    log('检测到房间码: ' + pendingCode);
+    actionArea.innerHTML = `
+      <button class="btn btn-connect" id="btnActivate" style="font-size:18px; padding:20px;">
+        ▶ 点击开始收听
+      </button>
+      <p style="color:#666; font-size:12px; margin-top:12px;">房间: ${pendingCode} — 需要点击一次以激活音频</p>
+    `;
+    document.getElementById('btnActivate').addEventListener('click', autoJoinAndActivate);
+  } else {
+    // Manual join mode
+    actionArea.innerHTML = `
+      <div style="margin-bottom:20px;">
+        <input type="text" id="codeInput" placeholder="输入房间码" maxlength="5" autocomplete="off"
+          style="width:100%; padding:14px 18px; border:2px solid rgba(255,255,255,0.1); border-radius:12px;
+          background:rgba(255,255,255,0.05); color:#e0e0e0; font-size:20px; font-weight:700;
+          letter-spacing:6px; text-align:center; text-transform:uppercase; outline:none;">
+      </div>
+      <button class="btn btn-connect" id="btnJoin" onclick="manualJoin()">连接</button>
+    `;
+  }
+});
+
+// --- Auto-join from QR scan ---
+async function autoJoinAndActivate() {
+  const btn = document.getElementById('btnActivate');
+  btn.disabled = true;
+  btn.textContent = '连接中...';
+
+  try {
+    // CRITICAL: Create AudioContext on user gesture (required by mobile browsers)
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      log('AudioContext 已激活，采样率: ' + audioContext.sampleRate + 'Hz');
+    }
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+      log('AudioContext 已恢复');
+    }
+    userActivated = true;
+
+    // Connect WebSocket and join room directly
+    await connectWS();
+    roomCode = pendingCode;
+    ws.send(JSON.stringify({ type: 'join', code: pendingCode }));
+    log('已发送加入请求: ' + pendingCode);
+  } catch (err) {
+    log('连接失败: ' + err.message);
+    btn.disabled = false;
+    btn.textContent = '▶ 重试';
+  }
+}
+
+// --- Manual join ---
+async function manualJoin() {
+  const codeEl = document.getElementById('codeInput');
+  const btn = document.getElementById('btnJoin');
+  const code = codeEl.value.trim().toUpperCase();
+  if (code.length < 4) { alert('请输入有效的房间码'); return; }
+
+  btn.disabled = true;
+  btn.textContent = '连接中...';
+
+  try {
+    await connectWS();
+    roomCode = code;
+    ws.send(JSON.stringify({ type: 'join', code }));
+  } catch (err) {
+    log('连接失败: ' + err.message);
+    alert('连接服务器失败');
+    btn.disabled = false;
+    btn.textContent = '连接';
+  }
+}
+
+// --- WebSocket ---
+function connectWS() {
+  return new Promise((resolve, reject) => {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}`;
+    log('正在连接: ' + url);
+    ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error('连接超时'));
+    }, 8000);
+
+    ws.onopen = () => {
+      clearTimeout(timeout);
+      log('WebSocket 已连接');
+      resolve();
+    };
+    ws.onerror = (e) => {
+      clearTimeout(timeout);
+      log('WebSocket 错误');
+      reject(new Error('WebSocket 连接失败'));
+    };
+    ws.onclose = () => {
+      log('WebSocket 断开');
+      if (playbackStarted) stopPlayback();
+      setStatus('error', '连接断开');
+    };
+
+    ws.onmessage = (e) => {
+      if (e.data instanceof ArrayBuffer) {
+        handleAudioData(e.data);
+        return;
+      }
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      handleSignaling(msg);
+    };
+  });
+}
+
+// --- Signaling ---
+function handleSignaling(msg) {
+  log('收到消息: ' + msg.type);
+  switch (msg.type) {
+    case 'joined':
+      // Switch to play view
+      document.getElementById('actionArea').classList.add('hidden');
+      document.getElementById('playArea').classList.remove('hidden');
+      document.getElementById('displayCode').textContent = msg.code;
+      setStatus('connected', '已连接，等待音频...');
+      log('已加入房间: ' + msg.code);
+      break;
+
+    case 'audio-meta':
+      remoteSampleRate = msg.sampleRate || 48000;
+      log('收到音频元数据: 采样率=' + remoteSampleRate + 'Hz');
+      document.getElementById('statSampleRate').textContent = remoteSampleRate + 'Hz';
+
+      // If user already activated AudioContext (auto-join), auto-play when data arrives
+      if (userActivated && audioContext && audioContext.state === 'running') {
+        document.getElementById('playBtn').disabled = false;
+        document.getElementById('playHint').textContent = '缓冲中...';
+        setStatus('buffering', '缓冲中...');
+        log('AudioContext 已激活，等待数据缓冲...');
+      } else {
+        // Manual join: enable play button for user to click
+        document.getElementById('playBtn').disabled = false;
+        document.getElementById('playHint').textContent = '点击播放 ▶';
+        log('请点击播放按钮');
+      }
+      break;
+
+    case 'peer-disconnected':
+      stopPlayback();
+      setStatus('error', '发送端已断开');
+      log('发送端已断开');
+      break;
+
+    case 'error':
+      log('错误: ' + msg.message);
+      alert(msg.message);
+      break;
+  }
+}
+
+// --- Audio Data Handler ---
+function handleAudioData(arrayBuffer) {
+  const int16 = new Int16Array(arrayBuffer);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) {
+    float32[i] = int16[i] / 32768;
+  }
+
+  if (!ringBuffer) {
+    ringBuffer = new Float32Array(RING_BUFFER_SIZE);
+  }
+
+  for (let i = 0; i < float32.length; i++) {
+    ringBuffer[bufferWritePos] = float32[i];
+    bufferWritePos = (bufferWritePos + 1) % RING_BUFFER_SIZE;
+  }
+
+  samplesBuffered += float32.length;
+  chunkCount++;
+  totalBytes += arrayBuffer.byteLength;
+
+  // Update stats every 20 chunks
+  if (chunkCount % 20 === 0) {
+    document.getElementById('statChunks').textContent = chunkCount;
+    document.getElementById('statBytes').textContent = formatBytes(totalBytes);
+  }
+
+  // First data arriving? Log it
+  if (chunkCount === 1) {
+    log('收到第一块音频数据! ' + arrayBuffer.byteLength + ' bytes');
+  }
+
+  // Auto-start playback if user has already activated audio
+  if (userActivated && !playbackStarted && audioContext && audioContext.state === 'running') {
+    const needed = remoteSampleRate * (INITIAL_BUFFER_MS / 1000);
+    if (samplesBuffered >= needed) {
+      log('缓冲足够 (' + samplesBuffered + ' samples / ' + needed + ' needed)，开始播放');
+      startPlayback();
+    }
+  }
+}
+
+// --- Playback ---
+async function togglePlay() {
+  if (!isPlaying) {
+    // Create/resume AudioContext on user gesture (CRITICAL for mobile)
+    if (!audioContext) {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
+      log('AudioContext 创建，采样率: ' + audioContext.sampleRate + 'Hz');
+    }
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+      log('AudioContext 已恢复');
+    }
+
+    userActivated = true;
+    document.getElementById('playHint').textContent = '缓冲中...';
+    setStatus('buffering', '缓冲中...');
+
+    // If we already have enough data, start immediately
+    const needed = remoteSampleRate * (INITIAL_BUFFER_MS / 1000);
+    if (samplesBuffered >= needed) {
+      startPlayback();
+    } else {
+      log('等待缓冲... (' + Math.round((samplesBuffered / remoteSampleRate) * 1000) + 'ms / ' + INITIAL_BUFFER_MS + 'ms)');
+    }
+  } else {
+    stopPlayback();
+  }
+}
+
+function startPlayback() {
+  if (playbackStarted) return;
+
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
+  }
+
+  // If the existing AudioContext sample rate doesn't match, close and recreate
+  if (audioContext.sampleRate !== remoteSampleRate) {
+    log('采样率不匹配 (ctx=' + audioContext.sampleRate + ', remote=' + remoteSampleRate + ')，重建 AudioContext');
+    const oldCtx = audioContext;
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
+    oldCtx.close().catch(() => {});
+  }
+
+  const bufferSize = 2048;
+  processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
+
+  processor.onaudioprocess = (e) => {
+    const output = e.outputBuffer.getChannelData(0);
+
+    if (samplesBuffered > 0) {
+      const toRead = Math.min(output.length, samplesBuffered);
+      for (let i = 0; i < toRead; i++) {
+        output[i] = ringBuffer[bufferReadPos];
+        bufferReadPos = (bufferReadPos + 1) % RING_BUFFER_SIZE;
+      }
+      samplesBuffered -= toRead;
+      for (let i = toRead; i < output.length; i++) {
+        output[i] = 0;
+      }
+    } else {
+      for (let i = 0; i < output.length; i++) {
+        output[i] = 0;
+      }
+    }
+  };
+
+  processor.connect(audioContext.destination);
+
+  // Volume meter
+  try {
+    const dest = audioContext.createMediaStreamDestination();
+    processor.connect(dest);
+    const source = audioContext.createMediaStreamSource(dest.stream);
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+  } catch (err) {
+    log('音量表设置失败: ' + err.message);
+  }
+
+  // Wave animation
+  const waveContainer = document.getElementById('waveContainer');
+  waveContainer.classList.remove('hidden');
+  waveContainer.innerHTML = '';
+  for (let i = 0; i < 32; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'wave-bar';
+    bar.style.height = '4px';
+    waveContainer.appendChild(bar);
+  }
+
+  playbackStarted = true;
+  isPlaying = true;
+  updateVolume();
+
+  document.getElementById('playBtn').textContent = '⏸';
+  document.getElementById('playBtn').classList.add('playing');
+  document.getElementById('playHint').textContent = '正在播放';
+  document.getElementById('volumeDisplay').classList.remove('hidden');
+  document.getElementById('statsPanel').classList.remove('hidden');
+  setStatus('playing', '正在播放 🎵');
+  log('播放已开始');
+}
+
+function stopPlayback() {
+  if (processor) { processor.disconnect(); processor = null; }
+  if (volumeAnimFrame) { cancelAnimationFrame(volumeAnimFrame); volumeAnimFrame = null; }
+  analyser = null;
+
+  playbackStarted = false;
+  isPlaying = false;
+  ringBuffer = null;
+  bufferWritePos = 0;
+  bufferReadPos = 0;
+  samplesBuffered = 0;
+
+  document.getElementById('playBtn').textContent = '▶';
+  document.getElementById('playBtn').classList.remove('playing');
+  document.getElementById('playBtn').disabled = true;
+  document.getElementById('playHint').textContent = '等待音频...';
+  document.getElementById('volumeDisplay').classList.add('hidden');
+  document.getElementById('statsPanel').classList.add('hidden');
+  document.getElementById('waveContainer').classList.add('hidden');
+  setStatus('connected', '已停止');
+}
+
+function updateVolume() {
+  if (!analyser) return;
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(data);
+  const avg = data.reduce((a, b) => a + b, 0) / data.length;
+  const pct = Math.min(100, (avg / 128) * 100);
+  document.getElementById('volumeBar').style.width = pct + '%';
+  document.getElementById('volumeText').textContent = Math.round(pct) + '%';
+
+  const bars = document.querySelectorAll('.wave-bar');
+  bars.forEach((bar, i) => {
+    const idx = Math.floor((i / bars.length) * data.length);
+    bar.style.height = Math.max(4, (data[idx] / 255) * 56) + 'px';
+  });
+
+  const bufferedMs = Math.round((samplesBuffered / remoteSampleRate) * 1000);
+  document.getElementById('statLatency').textContent = bufferedMs + 'ms';
+
+  volumeAnimFrame = requestAnimationFrame(updateVolume);
+}
+
+function formatBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+
+function setStatus(state, text) {
+  const dot = document.getElementById('statusDot');
+  dot.className = 'status-dot';
+  if (state === 'connected') dot.classList.add('connected');
+  if (state === 'playing') dot.classList.add('playing');
+  if (state === 'buffering') dot.classList.add('buffering');
+  if (state === 'error') dot.classList.add('error');
+  document.getElementById('statusText').textContent = text;
+}
+</script>
+</body>
+</html>
