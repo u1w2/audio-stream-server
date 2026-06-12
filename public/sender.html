@@ -423,12 +423,21 @@ function startP2P(deviceId) {
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   peerConnections[deviceId] = pc;
 
-  // Add local audio track via transceiver (more reliable than addTrack)
-  if (localAudioTrack) {
-    try {
-      pc.addTransceiver(localAudioTrack, { direction: 'sendonly', streams: [audioStream] });
-    } catch (_) {
-      // Fallback for older browsers
+  // Create a dedicated AudioContext-based stream for WebRTC
+  // This avoids browser restrictions on getDisplayMedia tracks
+  try {
+    const p2pCtx = new AudioContext();
+    const p2pSource = p2pCtx.createMediaStreamSource(audioStream);
+    const p2pDest = p2pCtx.createMediaStreamDestination();
+    p2pSource.connect(p2pDest);
+    // Use the destination's track for WebRTC
+    const webrtcTrack = p2pDest.stream.getAudioTracks()[0];
+    if (webrtcTrack) {
+      pc.addTrack(webrtcTrack, p2pDest.stream);
+    }
+  } catch (_) {
+    // Fallback: direct addTrack
+    if (localAudioTrack) {
       pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
     }
   }

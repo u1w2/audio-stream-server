@@ -122,6 +122,9 @@
     <button class="play-btn" id="playBtn" onclick="togglePlay()" disabled>▶</button>
     <p style="color:#666; font-size:12px;" id="playHint">等待音频...</p>
 
+    <!-- Hidden audio element for P2P playback -->
+    <audio id="p2pAudio" autoplay style="display:none;"></audio>
+
     <div class="volume-display hidden" id="volumeDisplay">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <span style="font-size:12px; color:#aaa;">音量</span>
@@ -381,6 +384,13 @@ function handleWebRTCOffer(msg) {
   p2pPC.onconnectionstatechange = () => {
     if (p2pPC.connectionState === 'failed' || p2pPC.connectionState === 'disconnected') {
       p2pMode = false;
+      // If P2P fails and we were playing via P2P, restart relay playback
+      if (playbackStarted && p2pRemoteStream) {
+        // Stop P2P audio element
+        const audioEl = document.getElementById('p2pAudio');
+        audioEl.srcObject = null;
+        // Restart relay-based playback since relay data is still coming
+      }
       if (!playbackStarted) {
         reportConnStatus('relay');
       }
@@ -406,28 +416,19 @@ function handleWebRTCOffer(msg) {
 function startP2PPlayback() {
   if (!p2pRemoteStream) return;
 
-  // Use the existing user-activated audioContext for playback
-  // (new AudioContext would be suspended without user gesture)
-  if (!audioContext || audioContext.state === 'closed') {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)();
-  }
-  if (audioContext.state === 'suspended') {
-    audioContext.resume().catch(() => {});
-  }
-  const ctx = audioContext;
+  // Use <audio> element for reliable playback
+  const audioEl = document.getElementById('p2pAudio');
+  audioEl.srcObject = p2pRemoteStream;
+  audioEl.play().catch(() => {});
 
-  // Clean up old analyser context
-  if (p2pAnalyseCtx && p2pAnalyseCtx !== ctx) {
-    p2pAnalyseCtx.close().catch(() => {});
-  }
-
-  p2pAnalyseCtx = ctx;
-  p2pAnalyseSource = ctx.createMediaStreamSource(p2pRemoteStream);
-  p2pAnalyser = ctx.createAnalyser();
+  // Set up volume analyser from the remote stream
+  if (p2pAnalyseCtx) p2pAnalyseCtx.close().catch(() => {});
+  p2pAnalyseCtx = new (window.AudioContext || window.webkitAudioContext)();
+  p2pAnalyseCtx.resume().catch(() => {});
+  p2pAnalyseSource = p2pAnalyseCtx.createMediaStreamSource(p2pRemoteStream);
+  p2pAnalyser = p2pAnalyseCtx.createAnalyser();
   p2pAnalyser.fftSize = 256;
   p2pAnalyseSource.connect(p2pAnalyser);
-  // Play directly through destination
-  p2pAnalyseSource.connect(ctx.destination);
 
   analyser = p2pAnalyser;
 
