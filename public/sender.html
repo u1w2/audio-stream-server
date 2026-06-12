@@ -39,7 +39,14 @@
     display: inline-flex; align-items: center; gap: 6px;
     padding: 8px 16px; border-radius: 20px;
     background: rgba(74, 222, 128, 0.1); border: 1px solid rgba(74, 222, 128, 0.3);
-    font-size: 14px; color: #4ade80; margin: 12px 0;
+    font-size: 14px; color: #4ade80;
+  }
+  .qr-row {
+    display: flex; align-items: center; justify-content: center; gap: 24px;
+    margin: 20px 0;
+  }
+  @media (max-width: 480px) {
+    .qr-row { flex-direction: column; gap: 12px; }
   }
   .btn {
     display: inline-flex; align-items: center; gap: 8px;
@@ -88,12 +95,13 @@
   </div>
 
   <div id="stepStreaming" class="hidden">
-    <div class="qr-container" id="qrContainer">
-      <div style="color:#999; font-size:13px;">生成二维码中...</div>
-    </div>
-
-    <div class="conn-badge">
-      📱 <span id="connCount"></span> 个设备已连接
+    <div class="qr-row">
+      <div class="qr-container" id="qrContainer">
+        <div style="color:#999; font-size:13px;">生成二维码中...</div>
+      </div>
+      <div class="conn-badge">
+        📱 <span id="connCount"></span> 个设备已连接
+      </div>
     </div>
 
     <div id="deviceList" style="margin:12px 0; text-align:left;"></div>
