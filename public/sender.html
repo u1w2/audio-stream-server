@@ -314,6 +314,9 @@ function handleSignaling(msg) {
       if (msg.connections === 0) {
         document.getElementById('btnStop').classList.add('hidden');
         setStatus('connected', '无设备连接，等待扫码...');
+      } else {
+        const count = Object.keys(deviceList).length;
+        setStatus('streaming', '正在推流 🎵 (' + count + ' 个设备)');
       }
       break;
     }
