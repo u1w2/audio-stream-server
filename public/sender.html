@@ -258,10 +258,10 @@ function handleSignaling(msg) {
       break;
 
     case 'peer-ready': {
-      document.getElementById('connCount').textContent = msg.connections || 1;
       const devId = msg.receiverId || ('device-' + (deviceCounter + 1));
       deviceCounter++;
       deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
+      updateConnCount();
       updateDeviceList();
       if (localAudioTrack) {
         startP2P(devId);
@@ -298,7 +298,6 @@ function handleSignaling(msg) {
       break;
 
     case 'peer-left': {
-      document.getElementById('connCount').textContent = msg.connections || 0;
       if (msg.receiverId && deviceList[msg.receiverId]) {
         cleanupPeerConnection(msg.receiverId);
         delete deviceList[msg.receiverId];
@@ -309,6 +308,7 @@ function handleSignaling(msg) {
           delete deviceList[keys[0]];
         }
       }
+      updateConnCount();
       updateDeviceList();
       if (msg.connections === 0) {
         document.getElementById('btnStop').classList.add('hidden');
@@ -321,6 +321,7 @@ function handleSignaling(msg) {
       Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
       deviceList = {};
       deviceCounter = 0;
+      updateConnCount();
       updateDeviceList();
       isStreaming = false;
       relayEnabled = true;
@@ -352,6 +353,11 @@ function updateDeviceList() {
       <span class="device-id">设备 ${dev.num}</span>
     </div>`;
   }).join('');
+}
+
+function updateConnCount() {
+  const count = Object.keys(deviceList).length;
+  document.getElementById('connCount').textContent = count;
 }
 
 // --- WebRTC P2P ---
