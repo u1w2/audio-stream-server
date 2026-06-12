@@ -89,7 +89,9 @@ wss.on('connection', (ws) => {
       case 'create': {
         let code;
         do { code = generateCode(); } while (rooms[code]);
-        rooms[code] = { sender: ws, receivers: [], receiverCount: 0 };
+        const p2pOnly = !!msg.p2pOnly;
+        const maxConnections = Math.max(1, Math.min(20, parseInt(msg.maxConnections) || 5));
+        rooms[code] = { sender: ws, p2pOnly, maxConnections, receivers: [], receiverCount: 0 };
         currentRoom = code;
         currentRole = 'sender';
 
@@ -111,14 +113,23 @@ wss.on('connection', (ws) => {
           return;
         }
         const room = rooms[code];
+        
+        // 检查连接数限制
+        if (room.receivers.length >= room.maxConnections) {
+          ws.send(JSON.stringify({ type: 'error', message: `房间已满（上限 ${room.maxConnections} 个设备）` }));
+          return;
+        }
+        
         room.receivers.push(ws);
         room.receiverCount++;
         currentRoom = code;
         currentRole = 'receiver';
         const count = room.receivers.length;
         ws.send(JSON.stringify({ type: 'joined', code }));
-        // Notify sender with connection count
+        // Notify sender with connection count and room config
         room.sender?.send(JSON.stringify({ type: 'peer-ready', connections: count }));
+        // Notify receiver of room mode
+        ws.send(JSON.stringify({ type: 'room-config', p2pOnly: room.p2pOnly }));
         console.log(`[Room] Joined: ${code} (total receivers: ${count})`);
         break;
       }
@@ -130,6 +141,20 @@ wss.on('connection', (ws) => {
         room.receivers.forEach(r => {
           if (r.readyState === 1) r.send(JSON.stringify(msg));
         });
+        break;
+      }
+
+      case 'connection-status': {
+        // Relay WebRTC connection status to sender UI for display
+        if (!currentRoom || !rooms[currentRoom]) return;
+        const room = rooms[currentRoom];
+        if (room.sender && room.sender.readyState === 1) {
+          room.sender.send(JSON.stringify({
+            type: 'connection-status',
+            receiverId: msg.receiverId,
+            mode: msg.mode // 'p2p' or 'relay'
+          }));
+        }
         break;
       }
     }

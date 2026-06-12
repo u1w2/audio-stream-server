@@ -115,6 +115,9 @@
   <div id="playArea" class="hidden">
     <p style="color:#888; font-size:14px; margin-bottom:4px;">房间</p>
     <p style="font-size:28px; font-weight:800; letter-spacing:8px; color:#4ade80;" id="displayCode"></p>
+    <div id="connModeDisplay" style="margin:8px auto; padding:4px 12px; border-radius:8px;
+      font-size:11px; font-weight:600; display:inline-block; background:rgba(102,126,234,0.1);
+      color:#667eea;">连接中...</div>
 
     <button class="play-btn" id="playBtn" onclick="togglePlay()" disabled>▶</button>
     <p style="color:#666; font-size:12px;" id="playHint">等待音频...</p>
@@ -178,6 +181,8 @@ let playbackStarted = false;
 let userActivated = false;
 const INITIAL_BUFFER_MS = 150;
 let p2pMode = false;
+let myReceiverId = null;
+let myP2POnly = false;
 
 // Store code from URL
 let pendingCode = null;
@@ -293,6 +298,8 @@ function handleSignaling(msg) {
       document.getElementById('actionArea').classList.add('hidden');
       document.getElementById('playArea').classList.remove('hidden');
       document.getElementById('displayCode').textContent = msg.code;
+      // Generate a unique receiver ID
+      myReceiverId = 'device-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       setStatus('connected', '已连接，等待音频...');
       break;
 
@@ -323,6 +330,16 @@ function handleSignaling(msg) {
       // Sender says WebRTC is/will be used — switch analyser to remote stream
       setupP2PAnalyser(msg);
       break;
+
+    case 'room-config':
+      // Room mode info (P2P-only, etc.)
+      myP2POnly = msg.p2pOnly;
+      if (msg.p2pOnly) {
+        document.getElementById('connModeDisplay').textContent = '🔵 P2P 专属房间';
+        document.getElementById('connModeDisplay').style.color = '#4ade80';
+        document.getElementById('connModeDisplay').style.background = 'rgba(74,222,128,0.1)';
+      }
+      break;
   }
 }
 
@@ -337,6 +354,7 @@ function setupP2PAnalyser(msg) {
       const stream = audioEl.srcObject;
       if (stream.id === msg.streamId || true) { // Accept any remote stream
         p2pMode = true;
+        reportConnStatus('p2p');
         if (p2pAnalyseCtx) p2pAnalyseCtx.close().catch(() => {});
         p2pAnalyseCtx = new (window.AudioContext || window.webkitAudioContext)();
         p2pAnalyseSource = p2pAnalyseCtx.createMediaStreamSource(stream);
@@ -353,6 +371,10 @@ function setupP2PAnalyser(msg) {
 // --- Audio Data Handler (WebSocket relay) ---
 function handleAudioData(arrayBuffer) {
   if (p2pMode) return; // Ignore relay data when P2P is active
+
+  if (!playbackStarted) {
+    reportConnStatus('relay');
+  }
 
   const int16 = new Int16Array(arrayBuffer);
   const float32 = new Float32Array(int16.length);
@@ -536,6 +558,25 @@ function formatBytes(b) {
   if (b < 1024) return b + ' B';
   if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
   return (b / 1048576).toFixed(1) + ' MB';
+}
+
+function reportConnStatus(mode) {
+  // mode: 'p2p' or 'relay'
+  if (!myReceiverId || !ws || ws.readyState !== 1) return;
+  try {
+    ws.send(JSON.stringify({ type: 'connection-status', receiverId: myReceiverId, mode }));
+  } catch (_) {}
+  // Update local display
+  const display = document.getElementById('connModeDisplay');
+  if (mode === 'p2p') {
+    display.textContent = '🔵 P2P 直连';
+    display.style.color = '#4ade80';
+    display.style.background = 'rgba(74,222,128,0.15)';
+  } else {
+    display.textContent = '🟠 服务器中继';
+    display.style.color = '#f59e0b';
+    display.style.background = 'rgba(245,158,11,0.15)';
+  }
 }
 
 function setStatus(state, text) {

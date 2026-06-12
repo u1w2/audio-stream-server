@@ -96,6 +96,19 @@
     background: rgba(102, 126, 234, 0.1); border-left: 3px solid #667eea;
     border-radius: 0 8px 8px 0; font-size: 13px; color: #aab; text-align: left;
   }
+
+  .device-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 12px; margin-bottom: 6px;
+    background: rgba(255,255,255,0.03); border-radius: 8px; font-size: 13px;
+  }
+  .device-item .device-id { color: #aaa; font-family: monospace; }
+  .device-item .device-status {
+    padding: 3px 10px; border-radius: 10px; font-size: 11px; font-weight: 600;
+  }
+  .device-status.p2p { background: rgba(74, 222, 128, 0.15); color: #4ade80; }
+  .device-status.relay { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+  .device-status.connecting { background: rgba(102, 126, 234, 0.15); color: #667eea; }
 </style>
 </head>
 <body>
@@ -117,6 +130,21 @@
 
   <!-- Step 1: Create room -->
   <div id="stepCreate">
+    <div style="margin-bottom:16px; text-align:left;">
+      <label style="display:flex; align-items:center; gap:8px; padding:10px 14px;
+        background:rgba(255,255,255,0.03); border-radius:10px; cursor:pointer;">
+        <input type="checkbox" id="chkP2POnly" style="width:18px;height:18px;accent-color:#667eea;">
+        <span style="font-size:14px;">仅允许 P2P 连接（内网用户）</span>
+      </label>
+      <div style="display:flex; align-items:center; gap:8px; margin-top:8px; padding:10px 14px;
+        background:rgba(255,255,255,0.03); border-radius:10px;">
+        <span style="font-size:14px; color:#aaa; white-space:nowrap;">最大连接数</span>
+        <input type="number" id="inputMaxConn" value="5" min="1" max="20"
+          style="width:60px; padding:6px 8px; border:1px solid rgba(255,255,255,0.15); border-radius:6px;
+          background:rgba(255,255,255,0.05); color:#e0e0e0; font-size:14px; text-align:center; outline:none;">
+        <span style="font-size:12px; color:#666;">(1-20)</span>
+      </div>
+    </div>
     <button class="btn btn-primary" id="btnCreate" onclick="createRoom()">创建房间</button>
   </div>
 
@@ -131,6 +159,9 @@
 
     <div class="conn-badge" id="connBadge">
       📱 <span id="connCount">0</span> 个设备已连接
+    </div>
+
+    <div id="deviceList" style="margin:12px 0; text-align:left;">
     </div>
 
     <div class="volume-meter" id="volumeMeter">
@@ -188,6 +219,8 @@ let streamStartTime = 0;
 let durationInterval = null;
 let isStreaming = false;
 let relayEnabled = true;
+let deviceCounter = 0;
+let deviceList = {}; // { deviceId: { num, mode } }
 
 // --- Check secure context ---
 function checkSecureContext() {
@@ -235,9 +268,12 @@ async function createRoom() {
   document.getElementById('btnCreate').disabled = true;
   setStatus('connected', '正在创建房间...');
 
+  const p2pOnly = document.getElementById('chkP2POnly').checked;
+  const maxConnections = parseInt(document.getElementById('inputMaxConn').value) || 5;
+
   try {
     await connectWS();
-    ws.send(JSON.stringify({ type: 'create', host: location.host }));
+    ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
     document.getElementById('btnCreate').disabled = false;
@@ -268,6 +304,11 @@ function handleSignaling(msg) {
 
     case 'peer-ready':
       document.getElementById('connCount').textContent = msg.connections || 1;
+      // Add a new device entry (connecting)
+      deviceCounter++;
+      const newDeviceId = 'device-' + deviceCounter;
+      deviceList[newDeviceId] = { num: deviceCounter, mode: 'connecting' };
+      updateDeviceList();
       if (!isStreaming) {
         setStatus('streaming', '设备已连接，正在请求音频权限...');
         autoStartStreaming();
@@ -283,8 +324,21 @@ function handleSignaling(msg) {
       }
       break;
 
+    case 'connection-status':
+      if (msg.receiverId && deviceList[msg.receiverId]) {
+        deviceList[msg.receiverId].mode = msg.mode; // 'p2p' or 'relay'
+        updateDeviceList();
+      }
+      break;
+
     case 'peer-left':
       document.getElementById('connCount').textContent = msg.connections || 0;
+      // Remove the last device (simple approach: oldest = removed)
+      const keys = Object.keys(deviceList);
+      if (keys.length > 0) {
+        delete deviceList[keys[0]];
+        updateDeviceList();
+      }
       if (msg.connections === 0) {
         stopStreaming();
         setStatus('connected', '所有设备已断开，等待重新连接...');
@@ -293,6 +347,9 @@ function handleSignaling(msg) {
 
     case 'peer-disconnected':
       stopStreaming();
+      deviceList = {};
+      deviceCounter = 0;
+      updateDeviceList();
       setStatus('connected', '连接断开');
       break;
 
@@ -306,6 +363,23 @@ function copyUrl() {
   if (receiverUrl) {
     navigator.clipboard.writeText(receiverUrl).then(() => alert('链接已复制！')).catch(() => {});
   }
+}
+
+function updateDeviceList() {
+  const container = document.getElementById('deviceList');
+  const entries = Object.entries(deviceList);
+  if (entries.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+  container.innerHTML = entries.map(([id, dev]) => {
+    const modeLabel = dev.mode === 'p2p' ? 'P2P 直连' : dev.mode === 'relay' ? '服务器中继' : '连接中...';
+    const modeClass = dev.mode;
+    return `<div class="device-item">
+      <span class="device-id">设备 ${dev.num}</span>
+      <span class="device-status ${modeClass}">${modeLabel}</span>
+    </div>`;
+  }).join('');
 }
 
 // --- Auto-start streaming when peer connects ---
