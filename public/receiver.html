@@ -94,6 +94,7 @@ let audioCtx = null; // 用户手势激活的 AudioContext
 let p2pPC = null;
 let p2pRemoteStream = null;
 let p2pAudioEl = null;
+let pendingCandidates = []; // 缓存 p2pPC 创建前到达的 ICE candidate
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 // Store code from URL
@@ -253,6 +254,9 @@ function handleSignaling(msg) {
     case 'webrtc-ice':
       if (p2pPC) {
         p2pPC.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+      } else {
+        // PC 还没创建，缓存起来等 offer 到了再处理
+        if (msg.candidate) pendingCandidates.push(msg.candidate);
       }
       break;
 
@@ -296,7 +300,18 @@ function handleWebRTCOffer(msg) {
     }
   };
 
+  // 消费之前缓存的 ICE candidate——在 setRemoteDescription 之后再添加
+  const flushPendingCandidates = () => {
+    if (pendingCandidates.length > 0) {
+      pendingCandidates.forEach(c => {
+        p2pPC.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
+      });
+      pendingCandidates = [];
+    }
+  };
+
   p2pPC.setRemoteDescription(new RTCSessionDescription(msg.sdp)).then(() => {
+    flushPendingCandidates();
     return p2pPC.createAnswer();
   }).then(answer => {
     return p2pPC.setLocalDescription(answer);
@@ -315,27 +330,20 @@ function startPlayback() {
   if (isPlaying) return;
   if (!p2pRemoteStream) return;
 
-  // 用用户手势激活的 AudioContext 播放，绕过移动端自动播放限制
+  // 用用户手势激活的 AudioContext 确保音频状态
   if (audioCtx && audioCtx.state === 'suspended') {
     audioCtx.resume();
   }
 
   const audioEl = document.getElementById('p2pAudio');
   audioEl.srcObject = p2pRemoteStream;
-  // 移动端需要由用户手势链触发 play()
-  const playPromise = audioEl.play();
-  if (playPromise) {
-    playPromise.catch(() => {
-      // 如果 autoplay 被阻止，用 AudioContext 创建 MediaElementSource
-      if (audioCtx) {
-        try {
-          const src = audioCtx.createMediaElementSource(audioEl);
-          src.connect(audioCtx.destination);
-          audioEl.play().catch(() => {});
-        } catch (_) {}
-      }
-    });
-  }
+  // 移动端 autoplay 限制：用 AudioContext 创建 GainNode 连接 audio 元素
+  // 但 createMediaElementSource 只能调用一次，所以直接用 play() + 重试
+  const doPlay = () => {
+    const p = audioEl.play();
+    if (p) p.catch(() => { setTimeout(doPlay, 300); });
+  };
+  doPlay();
 
   isPlaying = true;
   document.getElementById('playHint').textContent = '正在播放';
@@ -345,6 +353,7 @@ function startPlayback() {
 function stopPlayback() {
   if (p2pPC) { p2pPC.close(); p2pPC = null; }
   p2pRemoteStream = null;
+  pendingCandidates = [];
   isPlaying = false;
   document.getElementById('playHint').textContent = '已停止';
   setStatus('connected', '已停止');
