@@ -176,6 +176,21 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'leave': {
+        // Receiver explicitly leaves — clean up immediately
+        if (!currentRoom || !rooms[currentRoom]) break;
+        const room = rooms[currentRoom];
+        const idx = room.receivers.indexOf(ws);
+        if (idx !== -1) room.receivers.splice(idx, 1);
+        const count = room.receivers.length;
+        const receiverId = ws._receiverId || 'unknown';
+        if (room.sender && room.sender.readyState === 1) {
+          room.sender.send(JSON.stringify({ type: 'peer-left', connections: count, receiverId }));
+        }
+        console.log(`[Room] Receiver left (explicit): ${currentRoom} (${receiverId}, remaining: ${count})`);
+        break;
+      }
+
       case 'webrtc-offer':
       case 'webrtc-answer':
       case 'webrtc-ice': {

@@ -421,6 +421,10 @@ async function togglePlay() {
 function startPlayback() {
   if (playbackStarted) return;
 
+  // 注册页面离开事件：主动通知服务器退出
+  window.addEventListener('beforeunload', onLeavePage);
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
   if (!audioContext) {
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
   }
@@ -491,6 +495,19 @@ function setStatus(state, text) {
   if (state === 'buffering') dot.classList.add('buffering');
   if (state === 'error') dot.classList.add('error');
   document.getElementById('statusText').textContent = text;
+}
+
+// 页面离开时主动通知服务器
+function onLeavePage() {
+  if (ws && ws.readyState === 1 && roomCode) {
+    ws.send(JSON.stringify({ type: 'leave', code: roomCode }));
+  }
+}
+
+function onVisibilityChange() {
+  if (document.visibilityState === 'hidden') {
+    onLeavePage();
+  }
 }
 </script>
 </body>
