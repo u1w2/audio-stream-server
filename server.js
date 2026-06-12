@@ -206,10 +206,6 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('error', (err) => {
-    console.log(`[WS] Error: ${err.message}`);
-  });
-
   ws.on('close', () => {
     if (currentRoom && rooms[currentRoom]) {
       const room = rooms[currentRoom];

@@ -261,7 +261,6 @@ function handleSignaling(msg) {
       const devId = msg.receiverId || ('device-' + (deviceCounter + 1));
       deviceCounter++;
       deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
-      console.log('[DBG] peer-ready:', devId, 'deviceList:', JSON.stringify(Object.keys(deviceList)));
       updateDeviceList();
       if (localAudioTrack) {
         startP2P(devId);
@@ -298,11 +297,9 @@ function handleSignaling(msg) {
       break;
 
     case 'peer-left': {
-      console.log('[DBG] peer-left: receiverId=' + msg.receiverId + ' deviceList:', JSON.stringify(Object.keys(deviceList)));
       if (msg.receiverId && deviceList[msg.receiverId]) {
         cleanupPeerConnection(msg.receiverId);
         delete deviceList[msg.receiverId];
-        console.log('[DBG] matched and deleted');
       } else {
         const keys = Object.keys(deviceList);
         if (keys.length > 0) {
