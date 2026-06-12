@@ -115,9 +115,6 @@
   <div id="playArea" class="hidden">
     <p style="color:#888; font-size:14px; margin-bottom:4px;">房间</p>
     <p style="font-size:28px; font-weight:800; letter-spacing:8px; color:#4ade80;" id="displayCode"></p>
-    <div id="connModeDisplay" style="margin:8px auto; padding:4px 12px; border-radius:8px;
-      font-size:11px; font-weight:600; display:inline-block; background:rgba(102,126,234,0.1);
-      color:#667eea;">连接中...</div>
 
     <button class="play-btn" id="playBtn" onclick="togglePlay()" disabled>▶</button>
     <p style="color:#666; font-size:12px;" id="playHint">等待音频...</p>
@@ -324,13 +321,7 @@ function handleSignaling(msg) {
       break;
 
     case 'room-config':
-      // Room mode info (P2P-only, etc.)
       myP2POnly = msg.p2pOnly;
-      if (msg.p2pOnly) {
-        document.getElementById('connModeDisplay').textContent = '🔵 P2P 专属房间';
-        document.getElementById('connModeDisplay').style.color = '#4ade80';
-        document.getElementById('connModeDisplay').style.background = 'rgba(74,222,128,0.1)';
-      }
       break;
   }
 }
@@ -344,10 +335,6 @@ function handleWebRTCOffer(msg) {
   p2pPC.ontrack = (e) => {
     p2pRemoteStream = e.streams[0];
     p2pMode = true;
-    reportConnStatus('p2p');
-
-    // Start P2P playback immediately regardless of user activation
-    // The audio stream is from a remote track — no user gesture needed
     if (playbackStarted) {
       stopRelayPlayback();
     }
@@ -362,25 +349,15 @@ function handleWebRTCOffer(msg) {
 
   p2pPC.onconnectionstatechange = () => {
     if (p2pPC.connectionState === 'failed' || p2pPC.connectionState === 'disconnected') {
-      const wasP2P = p2pMode;
-      p2pMode = false;
-      // Cleanup P2P audio element
-      const audioEl = document.getElementById('p2pAudio');
-      audioEl.srcObject = null;
       p2pRemoteStream = null;
       if (p2pAnalyseCtx) { p2pAnalyseCtx.close().catch(() => {}); p2pAnalyseCtx = null; }
       p2pAnalyseSource = null;
       p2pAnalyser = null;
-      if (p2pPC) { p2pPC.close(); p2pPC = null; }
-      // If we were playing via P2P, switch analyser back to relay
-      if (wasP2P && playbackStarted) {
-        analyser = null; // will be re-setup by startPlayback's relay analyser
-        reportConnStatus('relay');
-        document.getElementById('playHint').textContent = 'P2P 断开，切换至中继...';
-        setStatus('playing', '中继播放 🎵');
-      } else if (!playbackStarted) {
-        reportConnStatus('relay');
+      if (playbackStarted) {
+        stopPlayback();
+        setStatus('error', '连接断开');
       }
+      if (p2pPC) { p2pPC.close(); p2pPC = null; }
     }
   };
 

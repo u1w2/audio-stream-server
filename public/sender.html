@@ -103,12 +103,6 @@
     background: rgba(255,255,255,0.03); border-radius: 8px; font-size: 13px;
   }
   .device-item .device-id { color: #aaa; font-family: monospace; }
-  .device-item .device-status {
-    padding: 3px 10px; border-radius: 10px; font-size: 11px; font-weight: 600;
-  }
-  .device-status.p2p { background: rgba(74, 222, 128, 0.15); color: #4ade80; }
-  .device-status.relay { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
-  .device-status.connecting { background: rgba(102, 126, 234, 0.15); color: #667eea; }
 </style>
 </head>
 <body>
@@ -131,11 +125,6 @@
   <!-- Step 1: Create room -->
   <div id="stepCreate">
     <div style="margin-bottom:16px; text-align:left;">
-      <label style="display:flex; align-items:center; gap:8px; padding:10px 14px;
-        background:rgba(255,255,255,0.03); border-radius:10px; cursor:pointer;">
-        <input type="checkbox" id="chkP2POnly" style="width:18px;height:18px;accent-color:#667eea;">
-        <span style="font-size:14px;">仅允许 P2P 连接（内网用户）</span>
-      </label>
       <div style="display:flex; align-items:center; gap:8px; margin-top:8px; padding:10px 14px;
         background:rgba(255,255,255,0.03); border-radius:10px;">
         <span style="font-size:14px; color:#aaa; white-space:nowrap;">最大连接数</span>
@@ -254,7 +243,7 @@ async function createRoom() {
   document.getElementById('btnCreate').disabled = true;
   setStatus('connected', '正在请求音频权限...');
 
-  const p2pOnly = document.getElementById('chkP2POnly').checked;
+  const p2pOnly = false;
   const maxConnections = parseInt(document.getElementById('inputMaxConn').value) || 5;
 
   // 先获取音频（弹系统窗口），再创建房间
@@ -421,11 +410,8 @@ function updateDeviceList() {
     return;
   }
   container.innerHTML = entries.map(([id, dev]) => {
-    const modeLabel = dev.mode === 'p2p' ? 'P2P 直连' : dev.mode === 'relay' ? '服务器中继' : '连接中...';
-    const modeClass = dev.mode;
     return `<div class="device-item">
       <span class="device-id">设备 ${dev.num}</span>
-      <span class="device-status ${modeClass}">${modeLabel}</span>
     </div>`;
   }).join('');
 }
@@ -632,6 +618,7 @@ async function autoStartStreaming() {
       }
       try {
         ws.send(int16Data.buffer);
+      } catch (_) {}
     };
 
     isStreaming = true;
