@@ -406,27 +406,41 @@ function handleWebRTCOffer(msg) {
 function startP2PPlayback() {
   if (!p2pRemoteStream) return;
 
-  // Create a new audio context for P2P
-  if (p2pAnalyseCtx) p2pAnalyseCtx.close().catch(() => {});
-  p2pAnalyseCtx = new (window.AudioContext || window.webkitAudioContext)();
-  p2pAnalyseSource = p2pAnalyseCtx.createMediaStreamSource(p2pRemoteStream);
-  p2pAnalyser = p2pAnalyseCtx.createAnalyser();
+  // Use the existing user-activated audioContext for playback
+  // (new AudioContext would be suspended without user gesture)
+  if (!audioContext || audioContext.state === 'closed') {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioContext.state === 'suspended') {
+    audioContext.resume().catch(() => {});
+  }
+  const ctx = audioContext;
+
+  // Clean up old analyser context
+  if (p2pAnalyseCtx && p2pAnalyseCtx !== ctx) {
+    p2pAnalyseCtx.close().catch(() => {});
+  }
+
+  p2pAnalyseCtx = ctx;
+  p2pAnalyseSource = ctx.createMediaStreamSource(p2pRemoteStream);
+  p2pAnalyser = ctx.createAnalyser();
   p2pAnalyser.fftSize = 256;
   p2pAnalyseSource.connect(p2pAnalyser);
-  // Play through a gain node (silent in loop but keeps audio flowing)
-  const p2pGain = p2pAnalyseCtx.createGain();
-  p2pGain.gain.value = 1;
-  p2pAnalyseSource.connect(p2pGain);
-  p2pGain.connect(p2pAnalyseCtx.destination);
+  // Play directly through destination
+  p2pAnalyseSource.connect(ctx.destination);
 
   analyser = p2pAnalyser;
 
   // Update UI
   isPlaying = true;
+  playbackStarted = true;
   document.getElementById('playBtn').textContent = '⏸';
   document.getElementById('playBtn').classList.add('playing');
+  document.getElementById('playBtn').disabled = false;
   document.getElementById('playHint').textContent = 'P2P 直连播放中';
   document.getElementById('volumeDisplay').classList.remove('hidden');
+  document.getElementById('statsPanel').classList.remove('hidden');
+  setStatus('playing', 'P2P 直连 🎵');
 }
 
 function stopRelayPlayback() {
