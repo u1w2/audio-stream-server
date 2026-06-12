@@ -94,7 +94,9 @@ wss.on('connection', (ws) => {
         currentRole = 'sender';
 
         const ts = Date.now();
-        const receiverUrl = `http://${DEFAULT_IP}:${PORT}/receiver?code=${code}&t=${ts}`;
+        // 优先用客户端上报的域名，否则回退到 DEFAULT_IP
+        const host = msg.host || `${DEFAULT_IP}:${PORT}`;
+        const receiverUrl = `https://${host}/receiver?code=${code}&t=${ts}`;
         const qrDataUrl = await generateQRDataUrl(receiverUrl);
 
         ws.send(JSON.stringify({ type: 'created', code, qrDataUrl, receiverUrl }));

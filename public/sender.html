@@ -237,7 +237,7 @@ async function createRoom() {
 
   try {
     await connectWS();
-    ws.send(JSON.stringify({ type: 'create' }));
+    ws.send(JSON.stringify({ type: 'create', host: location.host }));
   } catch (err) {
     setStatus('error', '创建失败');
     document.getElementById('btnCreate').disabled = false;
