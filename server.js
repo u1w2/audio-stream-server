@@ -130,8 +130,11 @@ wss.on('connection', (ws) => {
           return;
         }
         
-        room.receivers.push(ws);
+        // 分配唯一 receiverId
         room.receiverCount++;
+        const receiverId = 'dev-' + room.receiverCount + '-' + Date.now().toString(36);
+        room.receivers.push(ws);
+        ws._receiverId = receiverId;
         currentRoom = code;
         currentRole = 'receiver';
         const count = room.receivers.length;
@@ -142,12 +145,10 @@ wss.on('connection', (ws) => {
         try {
           qrDataUrl = await generateQRDataUrl(joinUrl);
         } catch (_) {}
-        ws.send(JSON.stringify({ type: 'joined', code, receiverIndex: count, qrDataUrl, joinUrl }));
-        // Notify sender with connection count and room config
-        room.sender?.send(JSON.stringify({ type: 'peer-ready', connections: count, receiverIndex: count }));
-        // Notify receiver of room mode
-        ws.send(JSON.stringify({ type: 'room-config', p2pOnly: room.p2pOnly }));
-        console.log(`[Room] Joined: ${code} (total receivers: ${count})`);
+        ws.send(JSON.stringify({ type: 'joined', code, receiverId, qrDataUrl, joinUrl }));
+        // Notify sender with connection count and real receiverId
+        room.sender?.send(JSON.stringify({ type: 'peer-ready', connections: count, receiverId }));
+        console.log(`[Room] Joined: ${code} (receiverId: ${receiverId}, total: ${count})`);
         break;
       }
 
@@ -181,20 +182,19 @@ wss.on('connection', (ws) => {
         // Relay WebRTC signaling messages between sender and receiver
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
-        // For offer/ICE from sender: send to specific receiver
+        // For offer/ICE from sender: send to specific receiver by its receiverId
         if (msg.targetReceiverId && room.receivers) {
-          const targetIdx = parseInt(msg.targetReceiverId.replace('device-', '')) - 1;
-          const target = room.receivers[targetIdx];
+          const target = room.receivers.find(r => r._receiverId === msg.targetReceiverId);
           if (target && target.readyState === 1) {
             target.send(JSON.stringify(msg));
           }
         }
         // For answer/ICE from receiver: send to sender
         if (currentRole === 'receiver' && room.sender && room.sender.readyState === 1) {
-          // Forward receiver's answer/ICE to sender, including receiver's identity
+          // Forward receiver's answer/ICE to sender, including its fixed receiverId
           room.sender.send(JSON.stringify({
             ...msg,
-            receiverId: msg.receiverId || ('device-' + (room.receivers.indexOf(ws) + 1))
+            receiverId: ws._receiverId
           }));
         }
         break;
@@ -217,11 +217,11 @@ wss.on('connection', (ws) => {
         const idx = room.receivers.indexOf(ws);
         if (idx !== -1) room.receivers.splice(idx, 1);
         const count = room.receivers.length;
-        const receiverId = 'device-' + (idx + 1);
+        const realReceiverId = ws._receiverId || 'device-' + (idx + 1);
         if (room.sender && room.sender.readyState === 1) {
-          room.sender.send(JSON.stringify({ type: 'peer-left', connections: count, receiverId }));
+          room.sender.send(JSON.stringify({ type: 'peer-left', connections: count, receiverId: realReceiverId }));
         }
-        console.log(`[Room] Receiver left: ${currentRoom} (idx=${idx+1}, remaining: ${count})`);
+        console.log(`[Room] Receiver left: ${currentRoom} (${realReceiverId}, remaining: ${count})`);
       }
     }
   });

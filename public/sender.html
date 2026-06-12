@@ -259,7 +259,7 @@ function handleSignaling(msg) {
 
     case 'peer-ready': {
       document.getElementById('connCount').textContent = msg.connections || 1;
-      const devId = 'device-' + (msg.receiverIndex || (deviceCounter + 1));
+      const devId = msg.receiverId || ('device-' + (deviceCounter + 1));
       deviceCounter++;
       deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
       updateDeviceList();

@@ -253,7 +253,7 @@ function connectWS() {
 function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
-      myReceiverId = 'device-' + (msg.receiverIndex || Date.now().toString(36));
+      myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
       document.getElementById('playHint').textContent = '等待音频...';
       setStatus('connected', '已连接，等待音频...');
       // 显示二维码（让别人扫码同听）
