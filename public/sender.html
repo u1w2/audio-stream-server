@@ -311,10 +311,8 @@ function handleSignaling(msg) {
       }
       updateDeviceList();
       if (msg.connections === 0) {
-        cleanupAudioPipeline();
-        isStreaming = false;
         document.getElementById('btnStop').classList.add('hidden');
-        setStatus('connected', '所有设备已断开，等待重新扫码...');
+        setStatus('connected', '无设备连接，等待扫码...');
       }
       break;
     }
@@ -324,11 +322,8 @@ function handleSignaling(msg) {
       deviceList = {};
       deviceCounter = 0;
       updateDeviceList();
-      cleanupAudioPipeline();
       isStreaming = false;
       relayEnabled = true;
-      document.getElementById('volumeBar').style.width = '0%';
-      document.getElementById('volumeText').textContent = '0%';
       document.getElementById('btnStop').classList.add('hidden');
       setStatus('connected', '设备已断开，等待重新扫码...');
       break;
