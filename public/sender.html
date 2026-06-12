@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>音频流发送端 - Audio Stream Sender</title>
+<title>音频流发送端</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -35,13 +35,12 @@
     background: white; border-radius: 12px;
   }
   .qr-container img { display: block; width: 200px; height: 200px; }
-  .receiver-url {
-    margin-top: 12px; padding: 8px 12px;
-    background: rgba(255,255,255,0.05); border-radius: 8px;
-    font-size: 11px; color: #888; word-break: break-all;
-    font-family: monospace; cursor: pointer;
+  .conn-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 16px; border-radius: 20px;
+    background: rgba(74, 222, 128, 0.1); border: 1px solid rgba(74, 222, 128, 0.3);
+    font-size: 14px; color: #4ade80; margin: 12px 0;
   }
-  .receiver-url:hover { background: rgba(255,255,255,0.08); }
   .btn {
     display: inline-flex; align-items: center; gap: 8px;
     padding: 14px 28px; border: none; border-radius: 12px;
@@ -54,39 +53,18 @@
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-danger { background: #dc2626; color: white; }
   .btn-danger:hover { background: #b91c1c; }
-  .conn-badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 8px 16px; border-radius: 20px;
-    background: rgba(74, 222, 128, 0.1); border: 1px solid rgba(74, 222, 128, 0.3);
-    font-size: 14px; color: #4ade80; margin: 12px 0;
-  }
-
-  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
-  .stat-item {
-    background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px; text-align: center;
-  }
-  .stat-value { font-size: 20px; font-weight: 700; color: #667eea; }
-  .stat-label { font-size: 11px; color: #777; margin-top: 4px; text-transform: uppercase; }
   .hidden { display: none !important; }
-  .warn-box {
-    margin: 20px 0; padding: 16px 20px;
-    background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3);
-    border-radius: 12px; text-align: left; font-size: 14px; color: #fca5a5;
-  }
-  .warn-box a { color: #667eea; text-decoration: underline; }
-  .warn-box code { background: rgba(255,255,255,0.1); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
-  .tip {
-    margin-top: 20px; padding: 12px 16px;
-    background: rgba(102, 126, 234, 0.1); border-left: 3px solid #667eea;
-    border-radius: 0 8px 8px 0; font-size: 13px; color: #aab; text-align: left;
-  }
   .device-item {
     display: flex; align-items: center; justify-content: space-between;
     padding: 8px 12px; margin-bottom: 6px;
     background: rgba(255,255,255,0.03); border-radius: 8px; font-size: 13px;
   }
   .device-item .device-id { color: #aaa; font-family: monospace; }
-
+  .tip {
+    margin-top: 20px; padding: 12px 16px;
+    background: rgba(102, 126, 234, 0.1); border-left: 3px solid #667eea;
+    border-radius: 0 8px 8px 0; font-size: 13px; color: #aab; text-align: left;
+  }
 </style>
 </head>
 <body>
@@ -99,44 +77,28 @@
     <span id="statusText">等待创建房间...</span>
   </div>
 
-  <!-- Secure context warning -->
   <div class="warn-box hidden" id="warnBox">
     ⚠️ <strong>浏览器安全限制：</strong>当前页面非安全上下文，无法捕获音频。<br><br>
     请改用 <strong>localhost</strong> 访问：<br>
     <a href="#" id="localhostLink"><code id="localhostUrl"></code></a>
   </div>
 
-  <!-- Step 1: Create room -->
   <div id="stepCreate">
-    <div style="margin-bottom:16px; text-align:left;">
-      <div style="display:flex; align-items:center; gap:8px; margin-top:8px; padding:10px 14px;
-        background:rgba(255,255,255,0.03); border-radius:10px;">
-        <span style="font-size:14px; color:#aaa; white-space:nowrap;">最大连接数</span>
-        <input type="number" id="inputMaxConn" value="5" min="1" max="20"
-          style="width:60px; padding:6px 8px; border:1px solid rgba(255,255,255,0.15); border-radius:6px;
-          background:rgba(255,255,255,0.05); color:#e0e0e0; font-size:14px; text-align:center; outline:none;">
-        <span style="font-size:12px; color:#666;">(1-20)</span>
-      </div>
-    </div>
     <button class="btn btn-primary" id="btnCreate" onclick="createRoom()">创建房间</button>
   </div>
 
-  <!-- Step 2: Show code & QR, streaming info -->
   <div id="stepStreaming" class="hidden">
     <div class="qr-container" id="qrContainer">
       <div style="color:#999; font-size:13px;">生成二维码中...</div>
     </div>
-    <div class="receiver-url" id="receiverUrl" onclick="copyUrl()" title="点击复制">加载中...</div>
 
-    <div class="conn-badge" id="connBadge">
+    <div class="conn-badge">
       📱 <span id="connCount"></span> 个设备已连接
     </div>
 
-    <div id="deviceList" style="margin:12px 0; text-align:left;">
-    </div>
+    <div id="deviceList" style="margin:12px 0; text-align:left;"></div>
 
     <button class="btn btn-danger" id="btnStop" onclick="stopStreaming()">⏹ 停止推流</button>
-
   </div>
 
   <div class="tip" id="tipBox">
@@ -147,22 +109,14 @@
 <script>
 let ws = null;
 let roomCode = null;
-let receiverUrl = '';
 let audioStream = null;
-let localAudioCtx = null;
-let processor = null;
-let sourceNode = null;
-let silentGain = null;
-let streamStartTime = 0;
-let durationInterval = null;
+let localAudioTrack = null;
 let isStreaming = false;
 let deviceCounter = 0;
 let deviceList = {};
 
 // WebRTC
 let peerConnections = {};
-let localAudioTrack = null;
-const P2P_TIMEOUT = 10000;
 const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
 
 // --- Check secure context ---
@@ -182,7 +136,7 @@ function checkSecureContext() {
 }
 checkSecureContext();
 
-// --- WebSocket ---
+// --- WebSocket (signaling only) ---
 function connectWS() {
   return new Promise((resolve, reject) => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -202,7 +156,6 @@ function connectWS() {
     };
 
     ws.onmessage = (e) => {
-      if (e.data instanceof ArrayBuffer) return;
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
       handleSignaling(msg);
@@ -214,8 +167,7 @@ async function createRoom() {
   document.getElementById('btnCreate').disabled = true;
   setStatus('connected', '正在请求音频权限...');
 
-  const p2pOnly = false;
-  const maxConnections = parseInt(document.getElementById('inputMaxConn').value) || 5;
+  const maxConnections = parseInt(document.getElementById('inputMaxConn')?.value) || 5;
 
   const audioOk = await requestAudioSource();
   if (!audioOk) {
@@ -228,7 +180,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly, maxConnections }));
+    ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
     document.getElementById('btnCreate').disabled = false;
@@ -239,7 +191,6 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'created':
       roomCode = msg.code;
-      receiverUrl = msg.receiverUrl || '';
       document.getElementById('stepCreate').classList.add('hidden');
       document.getElementById('stepStreaming').classList.remove('hidden');
       setStatus('connected', '房间已创建，等待手机扫码...');
@@ -251,9 +202,6 @@ function handleSignaling(msg) {
         document.getElementById('qrContainer').innerHTML =
           `<div style="color:#999; font-size:13px;">二维码生成失败</div>`;
       }
-      if (receiverUrl) {
-        document.getElementById('receiverUrl').textContent = receiverUrl;
-      }
       break;
 
     case 'peer-ready': {
@@ -261,15 +209,16 @@ function handleSignaling(msg) {
       deviceCounter++;
       deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
       updateDeviceList();
+      // P2P: 建连接发音频
       if (localAudioTrack) {
         startP2P(devId);
       }
       if (!isStreaming) {
-        setStatus('streaming', '设备已连接，正在启动推流...');
-        autoStartStreaming();
-      } else {
-        setStatus('streaming', '正在推流 🎵 (' + (msg.connections || 1) + ' 个设备)');
+        isStreaming = true;
+        document.getElementById('btnStop').classList.remove('hidden');
       }
+      const count = Object.keys(deviceList).length;
+      setStatus('streaming', '正在推流 🎵 (' + count + ' 个设备)');
       break;
     }
 
@@ -306,7 +255,7 @@ function handleSignaling(msg) {
         }
       }
       updateDeviceList();
-      if (msg.connections === 0) {
+      if (Object.keys(deviceList).length === 0) {
         document.getElementById('btnStop').classList.add('hidden');
         setStatus('connected', '无设备连接，等待扫码...');
       } else {
@@ -332,53 +281,15 @@ function handleSignaling(msg) {
   }
 }
 
-function copyUrl() {
-  if (receiverUrl) {
-    navigator.clipboard.writeText(receiverUrl).then(() => alert('链接已复制！')).catch(() => {});
-  }
-}
-
-function updateDeviceList() {
-  const container = document.getElementById('deviceList');
-  const entries = Object.entries(deviceList);
-  if (entries.length === 0) {
-    container.innerHTML = '';
-  } else {
-    container.innerHTML = entries.map(([id, dev]) => {
-      return `<div class="device-item">
-        <span class="device-id">设备 ${dev.num}</span>
-      </div>`;
-    }).join('');
-  }
-  updateConnCount();
-}
-
-function updateConnCount() {
-  const count = Object.keys(deviceList).length;
-  document.getElementById('connCount').textContent = count;
-}
-
 // --- WebRTC P2P ---
-// 每个 P2P 连接独立 AudioContext
 function startP2P(deviceId) {
   if (peerConnections[deviceId]) return;
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   peerConnections[deviceId] = pc;
 
-  // 创建独立 P2P 音频源
-  if (audioStream) {
-    try {
-      const ctx = new AudioContext();
-      const dest = ctx.createMediaStreamDestination();
-      const source = ctx.createMediaStreamSource(audioStream);
-      source.connect(dest);
-      pc._p2pCtx = ctx;
-      pc._p2pDest = dest;
-      const track = dest.stream.getAudioTracks()[0];
-      if (track) pc.addTrack(track, dest.stream);
-    } catch (_) {}
-  } else if (localAudioTrack) {
+  // 添加音频轨道
+  if (localAudioTrack) {
     pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
   }
 
@@ -392,7 +303,7 @@ function startP2P(deviceId) {
     if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
       updateDeviceMode(deviceId, 'p2p');
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      updateDeviceMode(deviceId, 'relay');
+      updateDeviceMode(deviceId, 'disconnected');
       cleanupPeerConnection(deviceId);
     }
   };
@@ -403,14 +314,14 @@ function startP2P(deviceId) {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, sdp: pc.localDescription.toJSON() }));
     }
+    // P2P 连接超时后清理
     setTimeout(() => {
       if (deviceList[deviceId] && deviceList[deviceId].mode === 'connecting') {
-        updateDeviceMode(deviceId, 'relay');
+        updateDeviceMode(deviceId, 'timeout');
         cleanupPeerConnection(deviceId);
       }
-    }, P2P_TIMEOUT);
+    }, 15000);
   }).catch(() => {
-    updateDeviceMode(deviceId, 'relay');
     cleanupPeerConnection(deviceId);
   });
 }
@@ -425,19 +336,18 @@ function updateDeviceMode(deviceId, mode) {
 function cleanupPeerConnection(deviceId) {
   const pc = peerConnections[deviceId];
   if (pc) {
-    if (pc._p2pCtx) { try { pc._p2pCtx.close().catch(() => {}); } catch(_) {} }
     pc.close();
     delete peerConnections[deviceId];
   }
 }
 
-// --- 提前请求音频权限 ---
+// --- 请求音频权限 ---
 async function requestAudioSource() {
   if (audioStream && localAudioTrack && localAudioTrack.readyState === 'live') {
     return true;
   }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    alert('浏览器不支持音频捕获！\\n请使用 http://localhost 访问此页面。');
+    alert('浏览器不支持音频捕获！\n请使用 http://localhost 访问此页面。');
     setStatus('error', '浏览器不支持');
     return false;
   }
@@ -450,7 +360,7 @@ async function requestAudioSource() {
 
     const audioTracks = displayStream.getAudioTracks();
     if (audioTracks.length === 0) {
-      alert('未获取到音频轨道！\\n\\n请确保在弹窗中：\\n1. 勾选了"共享系统音频"\\n2. 或选择了一个正在播放音频的标签页');
+      alert('未获取到音频轨道！\n\n请确保在弹窗中：\n1. 勾选了"共享系统音频"\n2. 或选择了一个正在播放音频的标签页');
       displayStream.getTracks().forEach(t => t.stop());
       setStatus('connected', '音频获取失败');
       return false;
@@ -471,86 +381,36 @@ async function requestAudioSource() {
   }
 }
 
-// --- 辅助 ---
-function cleanupAudioPipeline() {
-  if (processor) { processor.disconnect(); processor = null; }
-  if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
-  if (silentGain) { silentGain.disconnect(); silentGain = null; }
-  if (localAudioCtx) { localAudioCtx.close().catch(() => {}); localAudioCtx = null; }
-  if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
+// --- UI ---
+function updateDeviceList() {
+  const container = document.getElementById('deviceList');
+  const entries = Object.entries(deviceList);
+  if (entries.length === 0) {
+    container.innerHTML = '';
+  } else {
+    container.innerHTML = entries.map(([id, dev]) => {
+      return `<div class="device-item">
+        <span class="device-id">设备 ${dev.num}</span>
+      </div>`;
+    }).join('');
+  }
+  updateConnCount();
 }
 
-async function ensureAudioStream() {
-  if (audioStream) {
-    const tracks = audioStream.getAudioTracks();
-    if (tracks.length > 0 && tracks[0].readyState === 'live') {
-      localAudioTrack = tracks[0];
-      return true;
-    }
-    audioStream.getTracks().forEach(t => t.stop());
-    audioStream = null;
-    localAudioTrack = null;
-  }
-  return await requestAudioSource();
-}
-
-// --- 开始推流 ---
-async function autoStartStreaming() {
-  const audioOk = await ensureAudioStream();
-  if (!audioOk) return;
-
-  try {
-    localAudioCtx = new AudioContext();
-    const sampleRate = localAudioCtx.sampleRate;
-    ws.send(JSON.stringify({ type: 'audio-meta', sampleRate, channels: 1 }));
-
-    sourceNode = localAudioCtx.createMediaStreamSource(audioStream);
-    processor = localAudioCtx.createScriptProcessor(2048, 1, 1);
-    silentGain = localAudioCtx.createGain();
-    silentGain.gain.value = 0;
-
-    sourceNode.connect(processor);
-    processor.connect(silentGain);
-    silentGain.connect(localAudioCtx.destination);
-
-    streamStartTime = Date.now();
-
-    processor.onaudioprocess = (e) => {
-      if (ws.readyState !== 1) return;
-      if (ws.bufferedAmount > 1048576) return;
-
-      const inputData = e.inputBuffer.getChannelData(0);
-      const int16Data = new Int16Array(inputData.length);
-      for (let i = 0; i < inputData.length; i++) {
-        const s = Math.max(-1, Math.min(1, inputData[i]));
-        int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-      }
-      ws.send(int16Data.buffer);
-    };
-
-    isStreaming = true;
-    document.getElementById('btnStop').classList.remove('hidden');
-    const conns = document.getElementById('connCount').textContent;
-    setStatus('streaming', '正在推流 🎵 (' + conns + ' 个设备)');
-
-  } catch (err) {
-    if (err.name === 'NotAllowedError') {
-      setStatus('connected', '音频权限被拒绝，等待设备重新连接...');
-    } else {
-      alert('启动失败: ' + err.message);
-      setStatus('error', '推流失败');
-    }
-  }
+function updateConnCount() {
+  const count = Object.keys(deviceList).length;
+  document.getElementById('connCount').textContent = count;
 }
 
 function stopStreaming() {
-  cleanupAudioPipeline();
   if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
-  isStreaming = false;
   localAudioTrack = null;
-
   Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
   peerConnections = {};
+  deviceList = {};
+  deviceCounter = 0;
+  isStreaming = false;
+  updateDeviceList();
   document.getElementById('btnStop').classList.add('hidden');
   setStatus('connected', '已停止推流');
 }

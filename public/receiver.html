@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>音频播放 - Audio Stream Receiver</title>
+<title>音频播放</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -29,7 +29,6 @@
   }
   .status-dot.connected { background: #4ade80; box-shadow: 0 0 6px #4ade8066; }
   .status-dot.playing { background: #22d3ee; box-shadow: 0 0 6px #22d3ee66; animation: pulse 1.5s infinite; }
-  .status-dot.buffering { background: #f59e0b; box-shadow: 0 0 6px #f59e0b66; }
   .status-dot.error { background: #ef4444; box-shadow: 0 0 6px #ef444466; }
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
 
@@ -44,26 +43,10 @@
   .btn-connect:hover { opacity: 0.9; }
   .btn-connect:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  .play-btn {
-    width: 120px; height: 120px; border-radius: 50%; border: none;
-    background: linear-gradient(135deg, #4ade80, #22d3ee); color: #0a0a0f;
-    font-size: 40px; cursor: pointer; transition: all 0.2s;
-    display: flex; align-items: center; justify-content: center;
-    margin: 28px auto; box-shadow: 0 0 40px rgba(74, 222, 128, 0.2);
+  #playQrContainer {
+    margin: 20px 0;
   }
-  .play-btn:hover { transform: scale(1.05); }
-  .play-btn:active { transform: scale(0.95); }
-  .play-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
-  .play-btn.playing {
-    background: linear-gradient(135deg, #22d3ee, #667eea);
-    box-shadow: 0 0 40px rgba(34, 211, 238, 0.3);
-  }
-
-
-  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
-  .stat-item { background: rgba(255,255,255,0.03); border-radius: 10px; padding: 10px; }
-  .stat-value { font-size: 18px; font-weight: 700; color: #4ade80; }
-  .stat-label { font-size: 10px; color: #777; margin-top: 2px; text-transform: uppercase; }
+  #playQrContainer img { border-radius: 12px; }
 
   .hidden { display: none !important; }
 
@@ -84,47 +67,26 @@
     <span id="statusText">未连接</span>
   </div>
 
-  <!-- Main action area -->
-  <div id="actionArea">
-    <!-- Will be dynamically populated -->
-  </div>
+  <div id="actionArea"></div>
 
-  <!-- Playing area (shown during playback) -->
   <div id="playArea" class="hidden">
-    <!-- 二维码让别人扫码同听 -->
-    <div class="play-qr-container" id="playQrContainer">
+    <div id="playQrContainer">
       <div style="background:white; border-radius:12px; padding:12px; display:inline-block;">
         <img id="qrImage" style="width:160px;height:160px; display:block;" alt="QR">
       </div>
       <p style="color:#888; font-size:11px; margin-top:6px;">📱 让朋友扫码一起听</p>
     </div>
-    <p style="color:#666; font-size:12px;" id="playHint">等待音频...</p>
-
-    <!-- Hidden audio element for P2P playback -->
+    <p style="color:#666; font-size:12px;" id="playHint">连接中...</p>
     <audio id="p2pAudio" autoplay style="display:none;"></audio>
-
   </div>
 
   <div class="tip">💡 点击按钮即可开始收听。请确保手机音量已打开。</div>
 </div>
 
 <script>
-// --- State ---
 let ws = null;
 let roomCode = null;
-let audioContext = null;
-let processor = null;
 let isPlaying = false;
-let remoteSampleRate = 48000;
-let ringBuffer = null;
-let bufferWritePos = 0;
-let bufferReadPos = 0;
-const RING_BUFFER_SIZE = 48000 * 2;
-let samplesBuffered = 0;
-let playbackStarted = false;
-let userActivated = false;
-const INITIAL_BUFFER_MS = 80;
-let p2pMode = false;
 let myReceiverId = null;
 
 // WebRTC
@@ -171,15 +133,6 @@ async function autoJoinAndActivate() {
   btn.textContent = '连接中...';
 
   try {
-    if (!audioContext) {
-      audioContext = new (window.AudioContext || window.webkitAudioContext)();
-    }
-    if (audioContext.state === 'suspended') {
-      await audioContext.resume();
-    }
-    userActivated = true;
-
-    // 提前切换到播放界面
     document.getElementById('actionArea').classList.add('hidden');
     document.getElementById('playArea').classList.remove('hidden');
     document.getElementById('playHint').textContent = '连接中...';
@@ -218,7 +171,7 @@ async function manualJoin() {
   }
 }
 
-// --- WebSocket ---
+// --- WebSocket (signaling only) ---
 function connectWS() {
   return new Promise((resolve, reject) => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -233,15 +186,11 @@ function connectWS() {
     ws.onopen = () => { clearTimeout(timeout); resolve(); };
     ws.onerror = (e) => { clearTimeout(timeout); reject(new Error('WebSocket 连接失败')); };
     ws.onclose = () => {
-      if (playbackStarted) stopPlayback();
+      if (isPlaying) stopPlayback();
       setStatus('error', '连接断开');
     };
 
     ws.onmessage = (e) => {
-      if (e.data instanceof ArrayBuffer) {
-        handleAudioData(e.data);
-        return;
-      }
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
       handleSignaling(msg);
@@ -256,20 +205,19 @@ function handleSignaling(msg) {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
       document.getElementById('playHint').textContent = '等待音频...';
       setStatus('connected', '已连接，等待音频...');
-      // 显示二维码（让别人扫码同听）
       if (msg.qrDataUrl) {
         document.getElementById('qrImage').src = msg.qrDataUrl;
       }
       break;
     }
 
-    case 'audio-meta':
-      remoteSampleRate = msg.sampleRate || 48000;
-      if (userActivated && audioContext && audioContext.state === 'running') {
-        document.getElementById('playHint').textContent = '缓冲中...';
-        setStatus('buffering', '缓冲中...');
-      } else {
-        document.getElementById('playHint').textContent = '点击播放 ▶';
+    case 'webrtc-offer':
+      handleWebRTCOffer(msg);
+      break;
+
+    case 'webrtc-ice':
+      if (p2pPC) {
+        p2pPC.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
       }
       break;
 
@@ -283,19 +231,6 @@ function handleSignaling(msg) {
       document.getElementById('playHint').textContent = '❌ ' + msg.message;
       document.getElementById('playHint').style.color = '#fca5a5';
       break;
-
-    case 'webrtc-offer':
-      handleWebRTCOffer(msg);
-      break;
-
-    case 'webrtc-ice':
-      if (p2pPC) {
-        p2pPC.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
-      }
-      break;
-
-    case 'room-config':
-      break;
   }
 }
 
@@ -307,11 +242,7 @@ function handleWebRTCOffer(msg) {
 
   p2pPC.ontrack = (e) => {
     p2pRemoteStream = e.streams[0];
-    p2pMode = true;
-    if (playbackStarted) {
-      stopRelayPlayback();
-    }
-    startP2PPlayback();
+    startPlayback();
   };
 
   p2pPC.onicecandidate = (e) => {
@@ -323,13 +254,10 @@ function handleWebRTCOffer(msg) {
   p2pPC.onconnectionstatechange = () => {
     if (p2pPC.connectionState === 'failed' || p2pPC.connectionState === 'disconnected') {
       p2pRemoteStream = null;
-      p2pMode = false;
       if (p2pPC) { p2pPC.close(); p2pPC = null; }
-      // P2P 断开，回退中继，继续播放
-      if (playbackStarted) {
-        document.getElementById('playHint').textContent = '正在播放';
-        setStatus('playing', '正在播放 🎵');
-      }
+      document.getElementById('playHint').textContent = '连接断开';
+      setStatus('error', '连接断开');
+      isPlaying = false;
     }
   };
 
@@ -342,12 +270,14 @@ function handleWebRTCOffer(msg) {
       ws.send(JSON.stringify({ type: 'webrtc-answer', receiverId: myReceiverId, sdp: p2pPC.localDescription.toJSON() }));
     }
   }).catch(() => {
-    p2pMode = false;
+    p2pPC.close();
+    p2pPC = null;
   });
 }
 
-// --- Switch playback to P2P stream ---
-function startP2PPlayback() {
+// --- P2P Playback ---
+function startPlayback() {
+  if (isPlaying) return;
   if (!p2pRemoteStream) return;
 
   const audioEl = document.getElementById('p2pAudio');
@@ -355,131 +285,15 @@ function startP2PPlayback() {
   audioEl.play().catch(() => {});
 
   isPlaying = true;
-  playbackStarted = true;
-  document.getElementById('playHint').textContent = '正在播放';
-  setStatus('playing', '正在播放 🎵');
-}
-
-function stopRelayPlayback() {
-  if (processor) { processor.disconnect(); processor = null; }
-  ringBuffer = null;
-  samplesBuffered = 0;
-}
-
-// --- Audio Data Handler (WebSocket relay) ---
-function handleAudioData(arrayBuffer) {
-  if (p2pMode) return;
-
-  const int16 = new Int16Array(arrayBuffer);
-  const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) {
-    float32[i] = int16[i] / 32768;
-  }
-
-  if (!ringBuffer) {
-    ringBuffer = new Float32Array(RING_BUFFER_SIZE);
-  }
-
-  for (let i = 0; i < float32.length; i++) {
-    ringBuffer[bufferWritePos] = float32[i];
-    bufferWritePos = (bufferWritePos + 1) % RING_BUFFER_SIZE;
-  }
-
-  samplesBuffered += float32.length;
-
-  if (userActivated && !playbackStarted && audioContext && audioContext.state === 'running') {
-    const needed = remoteSampleRate * (INITIAL_BUFFER_MS / 1000);
-    if (samplesBuffered >= needed) {
-      startPlayback();
-    }
-  }
-}
-
-// --- Playback ---
-async function togglePlay() {
-  if (!isPlaying) {
-    if (!audioContext) {
-      audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
-    }
-    if (audioContext.state === 'suspended') {
-      await audioContext.resume();
-    }
-
-    userActivated = true;
-    document.getElementById('playHint').textContent = '缓冲中...';
-    setStatus('buffering', '缓冲中...');
-
-    const needed = remoteSampleRate * (INITIAL_BUFFER_MS / 1000);
-    if (samplesBuffered >= needed) {
-      startPlayback();
-    }
-  } else {
-    stopPlayback();
-  }
-}
-
-function startPlayback() {
-  if (playbackStarted) return;
-
-  if (!audioContext) {
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
-  }
-  if (audioContext.state === 'suspended') {
-    audioContext.resume().catch(() => {});
-  }
-
-  if (audioContext.sampleRate !== remoteSampleRate) {
-    const oldCtx = audioContext;
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
-    oldCtx.close().catch(() => {});
-  }
-
-  const bufferSize = 2048;
-  processor = audioContext.createScriptProcessor(bufferSize, 1, 1);
-
-  processor.onaudioprocess = (e) => {
-    const output = e.outputBuffer.getChannelData(0);
-
-    if (samplesBuffered > 0) {
-      const toRead = Math.min(output.length, samplesBuffered);
-      for (let i = 0; i < toRead; i++) {
-        output[i] = ringBuffer[bufferReadPos];
-        bufferReadPos = (bufferReadPos + 1) % RING_BUFFER_SIZE;
-      }
-      samplesBuffered -= toRead;
-      for (let i = toRead; i < output.length; i++) {
-        output[i] = 0;
-      }
-    } else {
-      for (let i = 0; i < output.length; i++) {
-        output[i] = 0;
-      }
-    }
-  };
-
-  processor.connect(audioContext.destination);
-
-  playbackStarted = true;
-  isPlaying = true;
-
   document.getElementById('playHint').textContent = '正在播放';
   setStatus('playing', '正在播放 🎵');
 }
 
 function stopPlayback() {
-  if (processor) { processor.disconnect(); processor = null; }
   if (p2pPC) { p2pPC.close(); p2pPC = null; }
   p2pRemoteStream = null;
-
-  playbackStarted = false;
   isPlaying = false;
-  p2pMode = false;
-  ringBuffer = null;
-  bufferWritePos = 0;
-  bufferReadPos = 0;
-  samplesBuffered = 0;
-
-  document.getElementById('playHint').textContent = '等待音频...';
+  document.getElementById('playHint').textContent = '已停止';
   setStatus('connected', '已停止');
 }
 
