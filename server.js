@@ -66,9 +66,9 @@ wss.on('connection', (ws) => {
   let currentRoom = null;
   let currentRole = null;
 
-  ws.on('message', async (raw) => {
-    // Ignore binary messages (no audio relay)
-    if (raw instanceof Buffer || raw instanceof ArrayBuffer) return;
+  ws.on('message', async (raw, isBinary) => {
+    // Ignore binary messages (no audio relay in P2P mode)
+    if (isBinary) return;
 
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
