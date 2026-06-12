@@ -59,28 +59,6 @@
     box-shadow: 0 0 40px rgba(34, 211, 238, 0.3);
   }
 
-  .volume-display {
-    margin: 20px auto; padding: 16px;
-    background: rgba(255,255,255,0.03); border-radius: 12px;
-  }
-  .volume-bar-container {
-    height: 6px; background: rgba(255,255,255,0.1);
-    border-radius: 3px; overflow: hidden; margin-top: 8px;
-  }
-  .volume-bar {
-    height: 100%; width: 0%;
-    background: linear-gradient(90deg, #4ade80, #22d3ee);
-    border-radius: 3px; transition: width 0.05s;
-  }
-
-  .wave-container {
-    height: 60px; margin: 20px 0;
-    display: flex; align-items: center; justify-content: center; gap: 3px;
-  }
-  .wave-bar {
-    width: 4px; background: linear-gradient(to top, #4ade80, #22d3ee);
-    border-radius: 2px; transition: height 0.08s;
-  }
 
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
   .stat-item { background: rgba(255,255,255,0.03); border-radius: 10px; padding: 10px; }
@@ -124,18 +102,6 @@
 
     <!-- Hidden audio element for P2P playback -->
     <audio id="p2pAudio" autoplay style="display:none;"></audio>
-
-    <div class="volume-display hidden" id="volumeDisplay">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <span style="font-size:12px; color:#aaa;">音量</span>
-        <span style="font-size:11px; color:#4ade80;" id="volumeText">0%</span>
-      </div>
-      <div class="volume-bar-container">
-        <div class="volume-bar" id="volumeBar"></div>
-      </div>
-    </div>
-
-    <div class="wave-container hidden" id="waveContainer"></div>
 
   </div>
 
@@ -361,8 +327,8 @@ function handleWebRTCOffer(msg) {
       if (p2pPC) { p2pPC.close(); p2pPC = null; }
       // P2P 断开，回退中继，继续播放
       if (playbackStarted) {
-        document.getElementById('playHint').textContent = '中继播放中';
-        setStatus('playing', '中继播放 🎵');
+        document.getElementById('playHint').textContent = '正在播放';
+        setStatus('playing', '正在播放 🎵');
       }
     }
   };
@@ -390,10 +356,8 @@ function startP2PPlayback() {
 
   isPlaying = true;
   playbackStarted = true;
-  document.getElementById('playHint').textContent = 'P2P 直连播放中';
-  document.getElementById('volumeDisplay').classList.remove('hidden');
-  document.getElementById('waveContainer').classList.remove('hidden');
-  setStatus('playing', 'P2P 直连 🎵');
+  document.getElementById('playHint').textContent = '正在播放';
+  setStatus('playing', '正在播放 🎵');
 }
 
 function stopRelayPlayback() {
@@ -495,77 +459,14 @@ function startPlayback() {
 
   processor.connect(audioContext.destination);
 
-  // Wave animation
-  const waveContainer = document.getElementById('waveContainer');
-  waveContainer.classList.remove('hidden');
-  waveContainer.innerHTML = '';
-  for (let i = 0; i < 32; i++) {
-    const bar = document.createElement('div');
-    bar.className = 'wave-bar';
-    bar.style.height = '4px';
-    waveContainer.appendChild(bar);
-  }
-
   playbackStarted = true;
   isPlaying = true;
 
   document.getElementById('playHint').textContent = '正在播放';
-  document.getElementById('volumeDisplay').classList.remove('hidden');
   setStatus('playing', '正在播放 🎵');
-
-  // 启动独立的 UI 更新循环（从 ring buffer 采样，不依赖 onaudioprocess）
-  startVolumeLoop();
-}
-
-let volumeLoopId = null;
-
-function startVolumeLoop() {
-  if (volumeLoopId) cancelAnimationFrame(volumeLoopId);
-  volumeLoopId = requestAnimationFrame(updateVolumeUI);
-}
-
-function stopVolumeLoop() {
-  if (volumeLoopId) { cancelAnimationFrame(volumeLoopId); volumeLoopId = null; }
-}
-
-function updateVolumeUI() {
-  // 从 ring buffer 采样计算音量（仅在非 P2P 模式）
-  if (!p2pMode && ringBuffer && playbackStarted) {
-    // 从 buffer 中采样最近写入的 2048 个样本
-    const sampleLen = Math.min(2048, RING_BUFFER_SIZE);
-    let sumSq = 0;
-    let pos = bufferWritePos;
-    for (let i = 0; i < sampleLen; i++) {
-      pos = (pos - 1 + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
-      const s = ringBuffer[pos];
-      sumSq += s * s;
-    }
-    const rms = Math.sqrt(sumSq / sampleLen);
-    const pct = Math.min(100, rms * 80);
-    document.getElementById('volumeBar').style.width = pct + '%';
-    document.getElementById('volumeText').textContent = Math.round(pct) + '%';
-
-    // 柱状波
-    const bars = document.getElementById('waveContainer').children;
-    const barCount = bars.length;
-    if (barCount > 0) {
-      const chunkSize = Math.max(1, Math.floor(sampleLen / barCount));
-      pos = bufferWritePos;
-      for (let i = 0; i < barCount; i++) {
-        let sum = 0;
-        for (let j = 0; j < chunkSize; j++) {
-          pos = (pos - 1 + RING_BUFFER_SIZE) % RING_BUFFER_SIZE;
-          sum += Math.abs(ringBuffer[pos]);
-        }
-        bars[i].style.height = Math.max(4, Math.min(60, (sum / chunkSize) * 100)) + 'px';
-      }
-    }
-  }
-  volumeLoopId = requestAnimationFrame(updateVolumeUI);
 }
 
 function stopPlayback() {
-  stopVolumeLoop();
   if (processor) { processor.disconnect(); processor = null; }
   if (p2pPC) { p2pPC.close(); p2pPC = null; }
   p2pRemoteStream = null;
@@ -579,8 +480,6 @@ function stopPlayback() {
   samplesBuffered = 0;
 
   document.getElementById('playHint').textContent = '等待音频...';
-  document.getElementById('volumeDisplay').classList.add('hidden');
-  document.getElementById('waveContainer').classList.add('hidden');
   setStatus('connected', '已停止');
 }
 

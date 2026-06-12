@@ -30,10 +30,6 @@
   .status-dot.streaming { background: #f59e0b; box-shadow: 0 0 8px #f59e0b66; animation: pulse 1.5s infinite; }
   .status-dot.error { background: #ef4444; box-shadow: 0 0 8px #ef444466; }
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.5; } }
-  .room-code {
-    font-size: 48px; font-weight: 800; letter-spacing: 12px; color: #667eea;
-    margin: 16px 0; font-family: 'Courier New', monospace;
-  }
   .qr-container {
     margin: 20px auto; display: inline-block; padding: 16px;
     background: white; border-radius: 12px;
@@ -64,19 +60,7 @@
     background: rgba(74, 222, 128, 0.1); border: 1px solid rgba(74, 222, 128, 0.3);
     font-size: 14px; color: #4ade80; margin: 12px 0;
   }
-  .volume-meter {
-    margin: 16px 0; padding: 16px;
-    background: rgba(255,255,255,0.03); border-radius: 12px;
-  }
-  .volume-bar-container {
-    height: 8px; background: rgba(255,255,255,0.1);
-    border-radius: 4px; overflow: hidden; margin-top: 8px;
-  }
-  .volume-bar {
-    height: 100%; width: 0%;
-    background: linear-gradient(90deg, #4ade80, #f59e0b, #ef4444);
-    border-radius: 4px; transition: width 0.05s;
-  }
+
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
   .stat-item {
     background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px; text-align: center;
@@ -102,14 +86,7 @@
     background: rgba(255,255,255,0.03); border-radius: 8px; font-size: 13px;
   }
   .device-item .device-id { color: #aaa; font-family: monospace; }
-  .wave-container {
-    height: 60px; margin: 16px 0;
-    display: flex; align-items: center; justify-content: center; gap: 3px;
-  }
-  .wave-bar {
-    width: 4px; background: linear-gradient(to top, #667eea, #764ba2);
-    border-radius: 2px; transition: height 0.08s;
-  }
+
 </style>
 </head>
 <body>
@@ -146,8 +123,6 @@
 
   <!-- Step 2: Show code & QR, streaming info -->
   <div id="stepStreaming" class="hidden">
-    <p style="color:#aaa; font-size:14px;">房间码</p>
-    <div class="room-code" id="roomCode"></div>
     <div class="qr-container" id="qrContainer">
       <div style="color:#999; font-size:13px;">生成二维码中...</div>
     </div>
@@ -159,18 +134,6 @@
 
     <div id="deviceList" style="margin:12px 0; text-align:left;">
     </div>
-
-    <div class="volume-meter" id="volumeMeter">
-      <div style="display:flex; justify-content:space-between; align-items:center;">
-        <span style="font-size:13px; color:#aaa;">音量</span>
-        <span style="font-size:12px; color:#667eea;" id="volumeText">0%</span>
-      </div>
-      <div class="volume-bar-container">
-        <div class="volume-bar" id="volumeBar"></div>
-      </div>
-    </div>
-
-    <div class="wave-container" id="waveContainer"></div>
 
     <button class="btn btn-danger" id="btnStop" onclick="stopStreaming()">⏹ 停止推流</button>
 
@@ -278,7 +241,6 @@ function handleSignaling(msg) {
     case 'created':
       roomCode = msg.code;
       receiverUrl = msg.receiverUrl || '';
-      document.getElementById('roomCode').textContent = roomCode;
       document.getElementById('stepCreate').classList.add('hidden');
       document.getElementById('stepStreaming').classList.remove('hidden');
       setStatus('connected', '房间已创建，等待手机扫码...');
@@ -351,8 +313,6 @@ function handleSignaling(msg) {
       if (msg.connections === 0) {
         cleanupAudioPipeline();
         isStreaming = false;
-        document.getElementById('volumeBar').style.width = '0%';
-        document.getElementById('volumeText').textContent = '0%';
         document.getElementById('btnStop').classList.add('hidden');
         setStatus('connected', '所有设备已断开，等待重新扫码...');
       }
@@ -571,16 +531,6 @@ async function autoStartStreaming() {
     processor.connect(silentGain);
     silentGain.connect(localAudioCtx.destination);
 
-    // 初始化柱状波
-    const waveContainer = document.getElementById('waveContainer');
-    waveContainer.innerHTML = '';
-    for (let i = 0; i < 32; i++) {
-      const bar = document.createElement('div');
-      bar.className = 'wave-bar';
-      bar.style.height = '4px';
-      waveContainer.appendChild(bar);
-    }
-
     streamStartTime = Date.now();
     relayEnabled = true;
 
@@ -621,14 +571,7 @@ function stopStreaming() {
   localAudioTrack = null;
 
   Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
-  Object.keys(peerConnections).forEach(id => {
-    const pc = peerConnections[id];
-    if (pc) { if (pc._p2pCtx) { try { pc._p2pCtx.close(); } catch(_) {} } pc.close(); }
-  });
   peerConnections = {};
-
-  document.getElementById('volumeBar').style.width = '0%';
-  document.getElementById('volumeText').textContent = '0%';
   document.getElementById('btnStop').classList.add('hidden');
   setStatus('connected', '已停止推流');
 }
