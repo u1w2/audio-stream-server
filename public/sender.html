@@ -272,13 +272,23 @@ function connectWS() {
 
 async function createRoom() {
   document.getElementById('btnCreate').disabled = true;
-  setStatus('connected', '正在创建房间...');
+  setStatus('connected', '正在请求音频权限...');
 
   const p2pOnly = document.getElementById('chkP2POnly').checked;
   const maxConnections = parseInt(document.getElementById('inputMaxConn').value) || 5;
 
+  // 先获取音频（弹系统窗口），再创建房间
+  const audioOk = await requestAudioSource();
+  if (!audioOk) {
+    document.getElementById('btnCreate').disabled = false;
+    return;
+  }
+
+  setStatus('connected', '音频已就绪，正在连接...');
+
   try {
     await connectWS();
+    setStatus('connected', '正在创建房间...');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -484,12 +494,12 @@ function cleanupPeerConnection(deviceId) {
   }
 }
 
-// --- Auto-start streaming when peer connects ---
-async function autoStartStreaming() {
+// --- 提前请求音频权限（创建房间前调用） ---
+async function requestAudioSource() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-    alert('浏览器不支持音频捕获！\n请使用 http://localhost 访问此页面。');
+    alert('浏览器不支持音频捕获！\\n请使用 http://localhost 访问此页面。');
     setStatus('error', '浏览器不支持');
-    return;
+    return false;
   }
 
   try {
@@ -500,18 +510,35 @@ async function autoStartStreaming() {
 
     const audioTracks = displayStream.getAudioTracks();
     if (audioTracks.length === 0) {
-      alert('未获取到音频轨道！\n\n请确保在弹窗中：\n1. 勾选了"共享系统音频"\n2. 或选择了一个正在播放音频的标签页');
+      alert('未获取到音频轨道！\\n\\n请确保在弹窗中：\\n1. 勾选了"共享系统音频"\\n2. 或选择了一个正在播放音频的标签页');
       displayStream.getTracks().forEach(t => t.stop());
-      setStatus('connected', '音频获取失败，等待设备重新连接...');
-      return;
+      setStatus('connected', '音频获取失败');
+      return false;
     }
 
     displayStream.getVideoTracks().forEach(t => t.stop());
     audioStream = new MediaStream(audioTracks);
-
-    // Save audio track for WebRTC
     localAudioTrack = audioStream.getAudioTracks()[0];
+    return true;
+  } catch (err) {
+    if (err.name === 'NotAllowedError') {
+      setStatus('connected', '音频权限被拒绝');
+    } else {
+      alert('获取音频失败: ' + err.message);
+      setStatus('error', '音频获取失败');
+    }
+    return false;
+  }
+}
+// --- 开始推流（音频已就绪，直接建立管线） ---
+async function autoStartStreaming() {
+  if (!audioStream) {
+    // 兜底：音频还没准备好重新请求
+    const ok = await requestAudioSource();
+    if (!ok) return;
+  }
 
+  try {
     // AudioContext
     localAudioCtx = new AudioContext();
     const sampleRate = localAudioCtx.sampleRate;
