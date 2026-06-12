@@ -449,29 +449,31 @@ function updateDeviceList() {
 }
 
 // --- WebRTC P2P ---
+let p2pCtx = null;  // 复用，避免反复创建 AudioContext
+let p2pDest = null; // 复用 destination
+
 function startP2P(deviceId) {
   if (peerConnections[deviceId]) return; // Already started
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   peerConnections[deviceId] = pc;
 
-  // Create a dedicated AudioContext-based stream for WebRTC
-  // This avoids browser restrictions on getDisplayMedia tracks
-  try {
-    const p2pCtx = new AudioContext();
-    const p2pSource = p2pCtx.createMediaStreamSource(audioStream);
-    const p2pDest = p2pCtx.createMediaStreamDestination();
-    p2pSource.connect(p2pDest);
-    // Use the destination's track for WebRTC
+  // Reuse the same AudioContext-based stream for all P2P connections
+  if (!p2pCtx && audioStream) {
+    try {
+      p2pCtx = new AudioContext();
+      p2pDest = p2pCtx.createMediaStreamDestination();
+      const p2pSource = p2pCtx.createMediaStreamSource(audioStream);
+      p2pSource.connect(p2pDest);
+    } catch (_) {}
+  }
+  if (p2pDest) {
     const webrtcTrack = p2pDest.stream.getAudioTracks()[0];
     if (webrtcTrack) {
       pc.addTrack(webrtcTrack, p2pDest.stream);
     }
-  } catch (_) {
-    // Fallback: direct addTrack
-    if (localAudioTrack) {
-      pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
-    }
+  } else if (localAudioTrack) {
+    pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
   }
 
   // ICE candidate -> server -> receiver
@@ -676,6 +678,9 @@ function stopStreaming() {
   isStreaming = false;
   relayEnabled = true;
   localAudioTrack = null;
+
+  // 清理 P2P 共用 AudioContext
+  if (p2pCtx) { p2pCtx.close().catch(() => {}); p2pCtx = null; p2pDest = null; }
 
   // Cleanup all WebRTC peer connections
   Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
