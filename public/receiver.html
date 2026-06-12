@@ -383,19 +383,28 @@ function handleWebRTCOffer(msg) {
 
   p2pPC.onconnectionstatechange = () => {
     if (p2pPC.connectionState === 'failed' || p2pPC.connectionState === 'disconnected') {
+      const wasP2P = p2pMode;
       p2pMode = false;
-      // If P2P fails and we were playing via P2P, restart relay playback
-      if (playbackStarted && p2pRemoteStream) {
-        // Stop P2P audio element
-        const audioEl = document.getElementById('p2pAudio');
-        audioEl.srcObject = null;
-        // Restart relay-based playback since relay data is still coming
-      }
-      if (!playbackStarted) {
+      // Cleanup P2P audio element
+      const audioEl = document.getElementById('p2pAudio');
+      audioEl.srcObject = null;
+      p2pRemoteStream = null;
+      if (p2pAnalyseCtx) { p2pAnalyseCtx.close().catch(() => {}); p2pAnalyseCtx = null; }
+      p2pAnalyseSource = null;
+      p2pAnalyser = null;
+      if (p2pPC) { p2pPC.close(); p2pPC = null; }
+      // If we were playing via P2P, switch analyser back to relay
+      if (wasP2P && playbackStarted) {
+        analyser = null; // will be re-setup by startPlayback's relay analyser
+        reportConnStatus('relay');
+        document.getElementById('playHint').textContent = 'P2P 断开，切换至中继...';
+        setStatus('playing', '中继播放 🎵');
+        document.getElementById('statChunks').textContent = chunkCount;
+        document.getElementById('statBytes').textContent = formatBytes(totalBytes);
+        document.getElementById('statLatency').textContent = Math.round((samplesBuffered / remoteSampleRate) * 1000) + 'ms';
+      } else if (!playbackStarted) {
         reportConnStatus('relay');
       }
-      p2pRemoteStream = null;
-      if (p2pPC) { p2pPC.close(); p2pPC = null; }
     }
   };
 

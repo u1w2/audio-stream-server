@@ -330,7 +330,7 @@ function handleSignaling(msg) {
         startP2P(devId);
       }
       if (!isStreaming) {
-        setStatus('streaming', '设备已连接，正在恢复推流...');
+        setStatus('streaming', '设备已连接，正在启动推流（中继）...');
         // 如果 audioStream 还在但管线停了，重启管线
         if (audioStream && localAudioTrack && localAudioTrack.readyState === 'live') {
           autoStartStreaming();
@@ -338,6 +338,8 @@ function handleSignaling(msg) {
           autoStartStreaming(); // 没有流的话内部会重新请求
         }
       } else {
+        // 已有推流管线，确保中继开启（P2P 可能还没连上）
+        relayEnabled = true;
         if (localAudioCtx) {
           ws.send(JSON.stringify({
             type: 'audio-meta',
@@ -501,9 +503,12 @@ function startP2P(deviceId) {
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
       updateDeviceMode(deviceId, 'p2p');
+      // P2P 成功，关闭此设备的中继
       updateRelayState();
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
       updateDeviceMode(deviceId, 'relay');
+      // P2P 失败，确保此设备走中继
+      relayEnabled = true;
       updateRelayState();
       cleanupPeerConnection(deviceId);
     }
@@ -538,10 +543,13 @@ function updateDeviceMode(deviceId, mode) {
 }
 
 function updateRelayState() {
-  // Check if all devices are P2P — if so, stop relay
-  const allP2P = Object.values(deviceList).every(d => d.mode === 'p2p');
-  const anyRelay = Object.values(deviceList).some(d => d.mode === 'relay');
-  if (allP2P && Object.keys(deviceList).length > 0) {
+  // 中继关闭条件：所有设备都已成功 P2P
+  // 中继开启条件：至少一个设备是 relay 状态
+  const entries = Object.values(deviceList);
+  if (entries.length === 0) return;
+  const allP2P = entries.every(d => d.mode === 'p2p');
+  const anyRelay = entries.some(d => d.mode === 'relay' || d.mode === 'connecting');
+  if (allP2P) {
     relayEnabled = false;
   } else if (anyRelay) {
     relayEnabled = true;
