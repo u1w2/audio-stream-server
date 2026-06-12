@@ -330,8 +330,13 @@ function handleSignaling(msg) {
         startP2P(devId);
       }
       if (!isStreaming) {
-        setStatus('streaming', '设备已连接，正在请求音频权限...');
-        autoStartStreaming();
+        setStatus('streaming', '设备已连接，正在恢复推流...');
+        // 如果 audioStream 还在但管线停了，重启管线
+        if (audioStream && localAudioTrack && localAudioTrack.readyState === 'live') {
+          autoStartStreaming();
+        } else {
+          autoStartStreaming(); // 没有流的话内部会重新请求
+        }
       } else {
         if (localAudioCtx) {
           ws.send(JSON.stringify({
@@ -367,24 +372,51 @@ function handleSignaling(msg) {
 
     case 'peer-left':
       document.getElementById('connCount').textContent = msg.connections || 0;
-      // Remove the last device (simple approach: oldest = removed)
-      const keys = Object.keys(deviceList);
-      if (keys.length > 0) {
-        delete deviceList[keys[0]];
+      // Remove the correct device from list
+      if (msg.receiverId && deviceList[msg.receiverId]) {
+        cleanupPeerConnection(msg.receiverId);
+        delete deviceList[msg.receiverId];
         updateDeviceList();
       }
       if (msg.connections === 0) {
-        stopStreaming();
-        setStatus('connected', '所有设备已断开，等待重新连接...');
+        // 所有人断开，只停管线，保留 audioStream
+        if (processor) { processor.disconnect(); processor = null; }
+        if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+        if (silentGain) { silentGain.disconnect(); silentGain = null; }
+        if (localAudioCtx) { localAudioCtx.close().catch(() => {}); localAudioCtx = null; }
+        if (meterCtx) { meterCtx.close().catch(() => {}); meterCtx = null; }
+        if (volumeAnimFrame) { cancelAnimationFrame(volumeAnimFrame); volumeAnimFrame = null; }
+        if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
+        analyser = null;
+        isStreaming = false;
+        document.getElementById('volumeBar').style.width = '0%';
+        document.getElementById('volumeText').textContent = '0%';
+        document.getElementById('btnStop').classList.add('hidden');
+        setStatus('connected', '所有设备已断开，等待重新扫码...');
       }
       break;
 
     case 'peer-disconnected':
-      stopStreaming();
+      // 只清理连接，不停止音频流（保留 audioStream 供下次扫码复用）
+      if (processor) { processor.disconnect(); processor = null; }
+      if (sourceNode) { sourceNode.disconnect(); sourceNode = null; }
+      if (silentGain) { silentGain.disconnect(); silentGain = null; }
+      if (localAudioCtx) { localAudioCtx.close().catch(() => {}); localAudioCtx = null; }
+      if (meterCtx) { meterCtx.close().catch(() => {}); meterCtx = null; }
+      if (volumeAnimFrame) { cancelAnimationFrame(volumeAnimFrame); volumeAnimFrame = null; }
+      if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
+      analyser = null;
+      isStreaming = false;
+      relayEnabled = true;
+      // 清理所有 WebRTC 连接
+      Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
       deviceList = {};
       deviceCounter = 0;
       updateDeviceList();
-      setStatus('connected', '连接断开');
+      document.getElementById('volumeBar').style.width = '0%';
+      document.getElementById('volumeText').textContent = '0%';
+      document.getElementById('btnStop').classList.add('hidden');
+      setStatus('connected', '设备已断开，等待重新扫码...');
       break;
 
     case 'error':
