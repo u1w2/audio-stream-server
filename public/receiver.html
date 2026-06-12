@@ -184,6 +184,11 @@ let p2pMode = false;
 let myReceiverId = null;
 let myP2POnly = false;
 
+// WebRTC
+let p2pPC = null;
+let p2pRemoteStream = null;
+const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+
 // Store code from URL
 let pendingCode = null;
 
@@ -326,9 +331,14 @@ function handleSignaling(msg) {
       alert(msg.message);
       break;
 
-    case 'webrtc-ready':
-      // Sender says WebRTC is/will be used — switch analyser to remote stream
-      setupP2PAnalyser(msg);
+    case 'webrtc-offer':
+      handleWebRTCOffer(msg);
+      break;
+
+    case 'webrtc-ice':
+      if (p2pPC) {
+        p2pPC.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+      }
       break;
 
     case 'room-config':
@@ -343,28 +353,108 @@ function handleSignaling(msg) {
   }
 }
 
-// --- WebRTC: Set up analyser from remote stream (for P2P volume display) ---
+// --- WebRTC: Handle incoming offer from sender ---
+function handleWebRTCOffer(msg) {
+  if (p2pPC) return; // Already handling
+
+  p2pPC = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+  p2pPC.ontrack = (e) => {
+    p2pRemoteStream = e.streams[0];
+    p2pMode = true;
+    reportConnStatus('p2p');
+
+    // If user already started playback, redirect to P2P stream
+    if (playbackStarted) {
+      // Stop relay-based playback and restart with P2P stream
+      stopRelayPlayback();
+      startP2PPlayback();
+    } else if (userActivated && audioContext && audioContext.state === 'running') {
+      // Audio context is active but playback hasn't started yet
+      document.getElementById('playHint').textContent = '缓冲中 (P2P)...';
+    }
+  };
+
+  p2pPC.onicecandidate = (e) => {
+    if (e.candidate && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'webrtc-ice', receiverId: myReceiverId, candidate: e.candidate.toJSON() }));
+    }
+  };
+
+  p2pPC.onconnectionstatechange = () => {
+    if (p2pPC.connectionState === 'failed' || p2pPC.connectionState === 'disconnected') {
+      p2pMode = false;
+      if (!playbackStarted) {
+        reportConnStatus('relay');
+      }
+      p2pRemoteStream = null;
+      if (p2pPC) { p2pPC.close(); p2pPC = null; }
+    }
+  };
+
+  p2pPC.setRemoteDescription(new RTCSessionDescription(msg.sdp)).then(() => {
+    return p2pPC.createAnswer();
+  }).then(answer => {
+    return p2pPC.setLocalDescription(answer);
+  }).then(() => {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'webrtc-answer', receiverId: myReceiverId, sdp: p2pPC.localDescription.toJSON() }));
+    }
+  }).catch(() => {
+    p2pMode = false;
+  });
+}
+
+// --- Switch playback to P2P stream ---
+function startP2PPlayback() {
+  if (!p2pRemoteStream) return;
+
+  // Create a new audio context for P2P
+  if (p2pAnalyseCtx) p2pAnalyseCtx.close().catch(() => {});
+  p2pAnalyseCtx = new (window.AudioContext || window.webkitAudioContext)();
+  p2pAnalyseSource = p2pAnalyseCtx.createMediaStreamSource(p2pRemoteStream);
+  p2pAnalyser = p2pAnalyseCtx.createAnalyser();
+  p2pAnalyser.fftSize = 256;
+  p2pAnalyseSource.connect(p2pAnalyser);
+  // Play through a gain node (silent in loop but keeps audio flowing)
+  const p2pGain = p2pAnalyseCtx.createGain();
+  p2pGain.gain.value = 1;
+  p2pAnalyseSource.connect(p2pGain);
+  p2pGain.connect(p2pAnalyseCtx.destination);
+
+  analyser = p2pAnalyser;
+
+  // Update UI
+  isPlaying = true;
+  document.getElementById('playBtn').textContent = '⏸';
+  document.getElementById('playBtn').classList.add('playing');
+  document.getElementById('playHint').textContent = 'P2P 直连播放中';
+  document.getElementById('volumeDisplay').classList.remove('hidden');
+}
+
+function stopRelayPlayback() {
+  // Stop the relay-based ScriptProcessor playback
+  if (processor) { processor.disconnect(); processor = null; }
+  ringBuffer = null;
+  samplesBuffered = 0;
+  // Don't close audioContext — we'll use p2pAnalyseCtx instead
+}
 function setupP2PAnalyser(msg) {
   if (!msg.streamId) return;
-  // Try to find a MediaStream with this ID
-  if (audioContext && audioContext.state === 'running') {
-    // We'll set up the analyser from the <audio> element's source
-    const audioEl = document.getElementById('remoteAudio');
-    if (audioEl && audioEl.srcObject) {
-      const stream = audioEl.srcObject;
-      if (stream.id === msg.streamId || true) { // Accept any remote stream
-        p2pMode = true;
-        reportConnStatus('p2p');
-        if (p2pAnalyseCtx) p2pAnalyseCtx.close().catch(() => {});
-        p2pAnalyseCtx = new (window.AudioContext || window.webkitAudioContext)();
-        p2pAnalyseSource = p2pAnalyseCtx.createMediaStreamSource(stream);
-        p2pAnalyser = p2pAnalyseCtx.createAnalyser();
-        p2pAnalyser.fftSize = 256;
-        p2pAnalyseSource.connect(p2pAnalyser);
-        // Replace the main analyser reference
-        analyser = p2pAnalyser;
-      }
-    }
+  // Accept any remote stream — always try to use P2P
+  const audioEl = document.getElementById('remoteAudio');
+  if (audioEl && audioEl.srcObject) {
+    const stream = audioEl.srcObject;
+    p2pMode = true;
+    reportConnStatus('p2p');
+    if (p2pAnalyseCtx) p2pAnalyseCtx.close().catch(() => {});
+    p2pAnalyseCtx = new (window.AudioContext || window.webkitAudioContext)();
+    p2pAnalyseSource = p2pAnalyseCtx.createMediaStreamSource(stream);
+    p2pAnalyser = p2pAnalyseCtx.createAnalyser();
+    p2pAnalyser.fftSize = 256;
+    p2pAnalyseSource.connect(p2pAnalyser);
+    // Replace the main analyser reference
+    analyser = p2pAnalyser;
   }
 }
 
@@ -506,8 +596,10 @@ function stopPlayback() {
   if (processor) { processor.disconnect(); processor = null; }
   if (volumeAnimFrame) { cancelAnimationFrame(volumeAnimFrame); volumeAnimFrame = null; }
   if (p2pAnalyseCtx) { p2pAnalyseCtx.close().catch(() => {}); p2pAnalyseCtx = null; }
+  if (p2pPC) { p2pPC.close(); p2pPC = null; }
   p2pAnalyseSource = null;
   p2pAnalyser = null;
+  p2pRemoteStream = null;
   analyser = null;
 
   playbackStarted = false;

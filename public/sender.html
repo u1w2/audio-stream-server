@@ -222,6 +222,12 @@ let relayEnabled = true;
 let deviceCounter = 0;
 let deviceList = {}; // { deviceId: { num, mode } }
 
+// WebRTC
+let peerConnections = {}; // { deviceId: RTCPeerConnection }
+let localAudioTrack = null;
+const P2P_TIMEOUT = 10000; // 10s fallback to relay
+const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+
 // --- Check secure context ---
 function checkSecureContext() {
   const isSecure = window.isSecureContext;
@@ -309,6 +315,10 @@ function handleSignaling(msg) {
       deviceCounter++;
       deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
       updateDeviceList();
+      // Start WebRTC P2P attempt
+      if (localAudioTrack) {
+        startP2P(devId);
+      }
       if (!isStreaming) {
         setStatus('streaming', '设备已连接，正在请求音频权限...');
         autoStartStreaming();
@@ -329,6 +339,20 @@ function handleSignaling(msg) {
         deviceList[msg.receiverId].mode = msg.mode;
       }
       updateDeviceList();
+      break;
+
+    case 'webrtc-answer':
+      if (msg.receiverId && peerConnections[msg.receiverId]) {
+        peerConnections[msg.receiverId].setRemoteDescription(new RTCSessionDescription(msg.sdp))
+          .catch(() => {});
+      }
+      break;
+
+    case 'webrtc-ice':
+      if (msg.receiverId && peerConnections[msg.receiverId]) {
+        peerConnections[msg.receiverId].addIceCandidate(new RTCIceCandidate(msg.candidate))
+          .catch(() => {});
+      }
       break;
 
     case 'peer-left':
@@ -382,6 +406,84 @@ function updateDeviceList() {
   }).join('');
 }
 
+// --- WebRTC P2P ---
+function startP2P(deviceId) {
+  if (peerConnections[deviceId]) return; // Already started
+
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  peerConnections[deviceId] = pc;
+
+  // Add local audio track
+  if (localAudioTrack) {
+    pc.addTrack(localAudioTrack, new MediaStream([localAudioTrack]));
+  }
+
+  // ICE candidate -> server -> receiver
+  pc.onicecandidate = (e) => {
+    if (e.candidate && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'webrtc-ice', targetReceiverId: deviceId, candidate: e.candidate.toJSON() }));
+    }
+  };
+
+  // Connection state
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
+      updateDeviceMode(deviceId, 'p2p');
+      updateRelayState();
+    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      updateDeviceMode(deviceId, 'relay');
+      updateRelayState();
+      cleanupPeerConnection(deviceId);
+    }
+  };
+
+  // Create offer
+  pc.createOffer().then(offer => {
+    return pc.setLocalDescription(offer);
+  }).then(() => {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, sdp: pc.localDescription.toJSON() }));
+    }
+    // Fallback: if P2P doesn't connect in time, use relay
+    setTimeout(() => {
+      if (deviceList[deviceId] && deviceList[deviceId].mode === 'connecting') {
+        updateDeviceMode(deviceId, 'relay');
+        updateRelayState();
+        cleanupPeerConnection(deviceId);
+      }
+    }, P2P_TIMEOUT);
+  }).catch(() => {
+    updateDeviceMode(deviceId, 'relay');
+    updateRelayState();
+  });
+}
+
+function updateDeviceMode(deviceId, mode) {
+  if (deviceList[deviceId]) {
+    deviceList[deviceId].mode = mode;
+    updateDeviceList();
+  }
+}
+
+function updateRelayState() {
+  // Check if all devices are P2P — if so, stop relay
+  const allP2P = Object.values(deviceList).every(d => d.mode === 'p2p');
+  const anyRelay = Object.values(deviceList).some(d => d.mode === 'relay');
+  if (allP2P && Object.keys(deviceList).length > 0) {
+    relayEnabled = false;
+  } else if (anyRelay) {
+    relayEnabled = true;
+  }
+}
+
+function cleanupPeerConnection(deviceId) {
+  const pc = peerConnections[deviceId];
+  if (pc) {
+    pc.close();
+    delete peerConnections[deviceId];
+  }
+}
+
 // --- Auto-start streaming when peer connects ---
 async function autoStartStreaming() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
@@ -406,6 +508,9 @@ async function autoStartStreaming() {
 
     displayStream.getVideoTracks().forEach(t => t.stop());
     audioStream = new MediaStream(audioTracks);
+
+    // Save audio track for WebRTC
+    localAudioTrack = audioStream.getAudioTracks()[0];
 
     // AudioContext
     localAudioCtx = new AudioContext();
@@ -493,6 +598,10 @@ function stopStreaming() {
   analyser = null;
   isStreaming = false;
   relayEnabled = true;
+  localAudioTrack = null;
+
+  // Cleanup all WebRTC peer connections
+  Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
 
   document.getElementById('volumeBar').style.width = '0%';
   document.getElementById('volumeText').textContent = '0%';

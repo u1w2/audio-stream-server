@@ -157,6 +157,31 @@ wss.on('connection', (ws) => {
         }
         break;
       }
+
+      case 'webrtc-offer':
+      case 'webrtc-answer':
+      case 'webrtc-ice': {
+        // Relay WebRTC signaling messages between sender and receiver
+        if (!currentRoom || !rooms[currentRoom]) return;
+        const room = rooms[currentRoom];
+        // For offer/ICE from sender: send to specific receiver
+        if (msg.targetReceiverId && room.receivers) {
+          const targetIdx = parseInt(msg.targetReceiverId.replace('device-', '')) - 1;
+          const target = room.receivers[targetIdx];
+          if (target && target.readyState === 1) {
+            target.send(JSON.stringify(msg));
+          }
+        }
+        // For answer/ICE from receiver: send to sender
+        if (currentRole === 'receiver' && room.sender && room.sender.readyState === 1) {
+          // Forward receiver's answer/ICE to sender, including receiver's identity
+          room.sender.send(JSON.stringify({
+            ...msg,
+            receiverId: msg.receiverId || ('device-' + (room.receivers.indexOf(ws) + 1))
+          }));
+        }
+        break;
+      }
     }
   });
 
