@@ -449,24 +449,38 @@ function updateDeviceList() {
 }
 
 // --- WebRTC P2P ---
-let p2pCtx = null;  // 复用，避免反复创建 AudioContext
-let p2pDest = null; // 复用 destination
+let p2pCtx = null;
+let p2pDest = null;
+
+function ensureP2PAudioSource() {
+  // 每次重建 p2pCtx/p2pDest，确保 track 状态新鲜
+  // 但只保留一个实例以避免 Chrome 限制
+  if (p2pCtx) {
+    try { p2pCtx.close().catch(() => {}); } catch (_) {}
+  }
+  p2pCtx = null;
+  p2pDest = null;
+  if (!audioStream) return false;
+  try {
+    p2pCtx = new AudioContext();
+    p2pDest = p2pCtx.createMediaStreamDestination();
+    const p2pSource = p2pCtx.createMediaStreamSource(audioStream);
+    p2pSource.connect(p2pDest);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 function startP2P(deviceId) {
-  if (peerConnections[deviceId]) return; // Already started
+  if (peerConnections[deviceId]) return;
+
+  // 确保 P2P 音频源有效
+  ensureP2PAudioSource();
 
   const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
   peerConnections[deviceId] = pc;
 
-  // Reuse the same AudioContext-based stream for all P2P connections
-  if (!p2pCtx && audioStream) {
-    try {
-      p2pCtx = new AudioContext();
-      p2pDest = p2pCtx.createMediaStreamDestination();
-      const p2pSource = p2pCtx.createMediaStreamSource(audioStream);
-      p2pSource.connect(p2pDest);
-    } catch (_) {}
-  }
   if (p2pDest) {
     const webrtcTrack = p2pDest.stream.getAudioTracks()[0];
     if (webrtcTrack) {
