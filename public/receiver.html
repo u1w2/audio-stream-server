@@ -88,6 +88,7 @@ let ws = null;
 let roomCode = null;
 let isPlaying = false;
 let myReceiverId = null;
+let audioCtx = null; // 用户手势激活的 AudioContext
 
 // WebRTC
 let p2pPC = null;
@@ -104,6 +105,12 @@ const preCode = urlParams.get('code');
 
 window.addEventListener('DOMContentLoaded', () => {
   const actionArea = document.getElementById('actionArea');
+
+  // 如果页面是从 bfcache 恢复（手机切后台再切回来），自动恢复连接
+  if (preCode && document.getElementById('btnActivate')) {
+    // 已有按钮，说明页面状态正确，不做额外操作
+  }
+
   if (preCode) {
     pendingCode = preCode.toUpperCase();
     actionArea.innerHTML = `
@@ -112,7 +119,12 @@ window.addEventListener('DOMContentLoaded', () => {
       </button>
       <p style="color:#666; font-size:12px; margin-top:12px;">房间: ${pendingCode}</p>
     `;
-    document.getElementById('btnActivate').addEventListener('click', autoJoinAndActivate);
+    document.getElementById('btnActivate').addEventListener('click', () => {
+      // 预激活音频上下文，绕过移动端自动播放限制
+      const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (tempCtx.state === 'suspended') tempCtx.resume();
+      activatePlayback(tempCtx);
+    });
   } else {
     actionArea.innerHTML = `
       <div style="margin-bottom:20px;">
@@ -126,8 +138,21 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-// --- Auto-join from QR scan ---
-async function autoJoinAndActivate() {
+// 处理 bfcache 恢复：手机切后台再切回来时不会重新执行 DOMContentLoaded
+window.addEventListener('pageshow', (e) => {
+  if (e.persisted && roomCode && isPlaying) {
+    // 页面从 bfcache 恢复，重新激活音频
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    const audioEl = document.getElementById('p2pAudio');
+    if (audioEl && audioEl.srcObject) {
+      audioEl.play().catch(() => {});
+    }
+  }
+});
+
+// --- Auto-join from QR scan (with pre-activated audio context) ---
+async function activatePlayback(ctx) {
+  audioCtx = ctx;
   const btn = document.getElementById('btnActivate');
   btn.disabled = true;
   btn.textContent = '连接中...';
@@ -188,6 +213,16 @@ function connectWS() {
     ws.onclose = () => {
       if (isPlaying) stopPlayback();
       setStatus('error', '连接断开');
+      // 自动重连
+      if (roomCode && !isPlaying) {
+        setTimeout(() => {
+          if (ws.readyState > 1) {
+            connectWS().then(() => {
+              ws.send(JSON.stringify({ type: 'join', code: roomCode }));
+            }).catch(() => {});
+          }
+        }, 2000);
+      }
     };
 
     ws.onmessage = (e) => {
@@ -280,9 +315,27 @@ function startPlayback() {
   if (isPlaying) return;
   if (!p2pRemoteStream) return;
 
+  // 用用户手势激活的 AudioContext 播放，绕过移动端自动播放限制
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+
   const audioEl = document.getElementById('p2pAudio');
   audioEl.srcObject = p2pRemoteStream;
-  audioEl.play().catch(() => {});
+  // 移动端需要由用户手势链触发 play()
+  const playPromise = audioEl.play();
+  if (playPromise) {
+    playPromise.catch(() => {
+      // 如果 autoplay 被阻止，用 AudioContext 创建 MediaElementSource
+      if (audioCtx) {
+        try {
+          const src = audioCtx.createMediaElementSource(audioEl);
+          src.connect(audioCtx.destination);
+          audioEl.play().catch(() => {});
+        } catch (_) {}
+      }
+    });
+  }
 
   isPlaying = true;
   document.getElementById('playHint').textContent = '正在播放';
