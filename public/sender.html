@@ -96,11 +96,6 @@
     background: rgba(102, 126, 234, 0.1); border-left: 3px solid #667eea;
     border-radius: 0 8px 8px 0; font-size: 13px; color: #aab; text-align: left;
   }
-  .log-area {
-    margin-top: 16px; padding: 12px; max-height: 150px; overflow-y: auto;
-    background: rgba(0,0,0,0.4); border-radius: 8px;
-    font-size: 11px; color: #666; text-align: left; font-family: monospace;
-  }
 </style>
 </head>
 <body>
@@ -173,8 +168,6 @@
   <div class="tip" id="tipBox">
     💡 提示：扫码后自动开始推流。弹窗中请<strong>勾选"共享系统音频"</strong>才能捕获电脑声音。
   </div>
-
-  <div class="log-area" id="logArea"></div>
 </div>
 
 <script>
@@ -194,6 +187,7 @@ let totalBytes = 0;
 let streamStartTime = 0;
 let durationInterval = null;
 let isStreaming = false;
+let relayEnabled = true;
 
 // --- Check secure context ---
 function checkSecureContext() {
@@ -206,20 +200,11 @@ function checkSecureContext() {
     document.getElementById('localhostLink').href = localUrl;
     document.getElementById('btnCreate').disabled = true;
     setStatus('error', '非安全上下文，请用 localhost 访问');
-    log('⚠️ 非安全上下文！请用 localhost 访问。');
     return false;
   }
   return true;
 }
 checkSecureContext();
-
-function log(msg) {
-  const el = document.getElementById('logArea');
-  const time = new Date().toLocaleTimeString();
-  el.innerHTML += `<div>[${time}] ${msg}</div>`;
-  el.scrollTop = el.scrollHeight;
-  console.log(msg);
-}
 
 // --- WebSocket ---
 function connectWS() {
@@ -233,9 +218,9 @@ function connectWS() {
       reject(new Error('连接超时'));
     }, 5000);
 
-    ws.onopen = () => { clearTimeout(timeout); log('WebSocket 已连接'); resolve(); };
-    ws.onerror = (e) => { clearTimeout(timeout); log('WebSocket 错误'); reject(e); };
-    ws.onclose = () => { log('WebSocket 断开'); setStatus('disconnected', '连接断开'); };
+    ws.onopen = () => { clearTimeout(timeout); resolve(); };
+    ws.onerror = (e) => { clearTimeout(timeout); reject(e); };
+    ws.onclose = () => { setStatus('disconnected', '连接断开'); };
 
     ws.onmessage = (e) => {
       if (e.data instanceof ArrayBuffer) return;
@@ -252,11 +237,9 @@ async function createRoom() {
 
   try {
     await connectWS();
-    log('正在发送创建房间请求...');
     ws.send(JSON.stringify({ type: 'create' }));
   } catch (err) {
-    log('创建失败: ' + err.message);
-    setStatus('error', '创建失败: ' + err.message);
+    setStatus('error', '创建失败');
     document.getElementById('btnCreate').disabled = false;
   }
 }
@@ -270,12 +253,10 @@ function handleSignaling(msg) {
       document.getElementById('stepCreate').classList.add('hidden');
       document.getElementById('stepStreaming').classList.remove('hidden');
       setStatus('connected', '房间已创建，等待手机扫码...');
-      log('房间创建成功: ' + roomCode);
 
       if (msg.qrDataUrl) {
         document.getElementById('qrContainer').innerHTML =
           `<img src="${msg.qrDataUrl}" alt="QR Code" style="width:200px;height:200px;">`;
-        log('二维码已生成');
       } else {
         document.getElementById('qrContainer').innerHTML =
           `<div style="color:#999; font-size:13px;">二维码生成失败</div>`;
@@ -287,13 +268,10 @@ function handleSignaling(msg) {
 
     case 'peer-ready':
       document.getElementById('connCount').textContent = msg.connections || 1;
-      log('设备已连接 (共 ' + (msg.connections || 1) + ' 个)');
-      // Auto-start streaming if not already
       if (!isStreaming) {
         setStatus('streaming', '设备已连接，正在请求音频权限...');
         autoStartStreaming();
       } else {
-        // Re-send audio-meta to new receiver
         if (localAudioCtx) {
           ws.send(JSON.stringify({
             type: 'audio-meta',
@@ -307,7 +285,6 @@ function handleSignaling(msg) {
 
     case 'peer-left':
       document.getElementById('connCount').textContent = msg.connections || 0;
-      log('设备已断开 (剩余 ' + (msg.connections || 0) + ' 个)');
       if (msg.connections === 0) {
         stopStreaming();
         setStatus('connected', '所有设备已断开，等待重新连接...');
@@ -317,11 +294,9 @@ function handleSignaling(msg) {
     case 'peer-disconnected':
       stopStreaming();
       setStatus('connected', '连接断开');
-      log('连接断开');
       break;
 
     case 'error':
-      log('错误: ' + msg.message);
       alert(msg.message);
       break;
   }
@@ -342,7 +317,6 @@ async function autoStartStreaming() {
   }
 
   try {
-    log('请求系统音频...');
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
@@ -358,12 +332,10 @@ async function autoStartStreaming() {
 
     displayStream.getVideoTracks().forEach(t => t.stop());
     audioStream = new MediaStream(audioTracks);
-    log('获取到 ' + audioTracks.length + ' 个音频轨道: ' + audioTracks.map(t => t.label).join(', '));
 
     // AudioContext
     localAudioCtx = new AudioContext();
     const sampleRate = localAudioCtx.sampleRate;
-    log('AudioContext 采样率: ' + sampleRate + 'Hz');
 
     // Send metadata
     ws.send(JSON.stringify({ type: 'audio-meta', sampleRate, channels: 1 }));
@@ -389,9 +361,11 @@ async function autoStartStreaming() {
     chunkCount = 0;
     totalBytes = 0;
     streamStartTime = Date.now();
+    relayEnabled = true;
 
     processor.onaudioprocess = (e) => {
       if (ws.readyState !== 1) return;
+      if (!relayEnabled) return; // Skip relay when all receivers are P2P
       const inputData = e.inputBuffer.getChannelData(0);
       const int16Data = new Int16Array(inputData.length);
       for (let i = 0; i < inputData.length; i++) {
@@ -407,7 +381,7 @@ async function autoStartStreaming() {
           document.getElementById('statBytes').textContent = formatBytes(totalBytes);
           document.getElementById('statSampleRate').textContent = sampleRate + 'Hz';
         }
-      } catch (err) { log('发送失败: ' + err.message); }
+      } catch (_) {}
     };
 
     isStreaming = true;
@@ -423,13 +397,9 @@ async function autoStartStreaming() {
       document.getElementById('statDuration').textContent = m > 0 ? m + 'm' + s + 's' : s + 's';
     }, 1000);
 
-    log('推流已开始');
-
   } catch (err) {
-    log('推流失败: ' + err.message);
     if (err.name === 'NotAllowedError') {
       setStatus('connected', '音频权限被拒绝，等待设备重新连接...');
-      log('权限被拒绝，下次设备连接时会重新请求');
     } else {
       alert('启动失败: ' + err.message);
       setStatus('error', '推流失败');
@@ -448,12 +418,12 @@ function stopStreaming() {
   if (durationInterval) { clearInterval(durationInterval); durationInterval = null; }
   analyser = null;
   isStreaming = false;
+  relayEnabled = true;
 
   document.getElementById('volumeBar').style.width = '0%';
   document.getElementById('volumeText').textContent = '0%';
   document.getElementById('btnStop').classList.add('hidden');
   setStatus('connected', '已停止推流');
-  log('推流已停止');
 }
 
 function updateVolume() {

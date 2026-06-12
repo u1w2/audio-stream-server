@@ -94,12 +94,6 @@
     background: rgba(74, 222, 128, 0.08); border-left: 3px solid #4ade80;
     border-radius: 0 8px 8px 0; font-size: 12px; color: #8b9; text-align: left;
   }
-
-  .log-area {
-    margin-top: 16px; padding: 12px; max-height: 150px; overflow-y: auto;
-    background: rgba(0,0,0,0.4); border-radius: 8px;
-    font-size: 10px; color: #666; text-align: left; font-family: monospace;
-  }
 </style>
 </head>
 <body>
@@ -158,7 +152,6 @@
   </div>
 
   <div class="tip">💡 点击按钮即可开始收听。请确保手机音量已打开。</div>
-  <div class="log-area" id="logArea"></div>
 </div>
 
 <script>
@@ -169,6 +162,9 @@ let audioContext = null;
 let processor = null;
 let analyser = null;
 let volumeAnimFrame = null;
+let p2pAnalyseCtx = null;
+let p2pAnalyseSource = null;
+let p2pAnalyser = null;
 let isPlaying = false;
 let chunkCount = 0;
 let totalBytes = 0;
@@ -181,17 +177,10 @@ let samplesBuffered = 0;
 let playbackStarted = false;
 let userActivated = false;
 const INITIAL_BUFFER_MS = 150;
+let p2pMode = false;
 
 // Store code from URL
 let pendingCode = null;
-
-function log(msg) {
-  const el = document.getElementById('logArea');
-  const time = new Date().toLocaleTimeString();
-  el.innerHTML += `<div>[${time}] ${msg}</div>`;
-  el.scrollTop = el.scrollHeight;
-  console.log('[Receiver]', msg);
-}
 
 // --- Initialize UI based on URL params ---
 const urlParams = new URLSearchParams(window.location.search);
@@ -200,9 +189,7 @@ const preCode = urlParams.get('code');
 window.addEventListener('DOMContentLoaded', () => {
   const actionArea = document.getElementById('actionArea');
   if (preCode) {
-    // QR scan auto-join mode: show a big activation button
     pendingCode = preCode.toUpperCase();
-    log('检测到房间码: ' + pendingCode);
     actionArea.innerHTML = `
       <button class="btn btn-connect" id="btnActivate" style="font-size:18px; padding:20px;">
         ▶ 点击开始收听
@@ -211,7 +198,6 @@ window.addEventListener('DOMContentLoaded', () => {
     `;
     document.getElementById('btnActivate').addEventListener('click', autoJoinAndActivate);
   } else {
-    // Manual join mode
     actionArea.innerHTML = `
       <div style="margin-bottom:20px;">
         <input type="text" id="codeInput" placeholder="输入房间码" maxlength="5" autocomplete="off"
@@ -231,24 +217,18 @@ async function autoJoinAndActivate() {
   btn.textContent = '连接中...';
 
   try {
-    // CRITICAL: Create AudioContext on user gesture (required by mobile browsers)
     if (!audioContext) {
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      log('AudioContext 已激活，采样率: ' + audioContext.sampleRate + 'Hz');
     }
     if (audioContext.state === 'suspended') {
       await audioContext.resume();
-      log('AudioContext 已恢复');
     }
     userActivated = true;
 
-    // Connect WebSocket and join room directly
     await connectWS();
     roomCode = pendingCode;
     ws.send(JSON.stringify({ type: 'join', code: pendingCode }));
-    log('已发送加入请求: ' + pendingCode);
   } catch (err) {
-    log('连接失败: ' + err.message);
     btn.disabled = false;
     btn.textContent = '▶ 重试';
   }
@@ -269,7 +249,6 @@ async function manualJoin() {
     roomCode = code;
     ws.send(JSON.stringify({ type: 'join', code }));
   } catch (err) {
-    log('连接失败: ' + err.message);
     alert('连接服务器失败');
     btn.disabled = false;
     btn.textContent = '连接';
@@ -280,9 +259,7 @@ async function manualJoin() {
 function connectWS() {
   return new Promise((resolve, reject) => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}`;
-    log('正在连接: ' + url);
-    ws = new WebSocket(url);
+    ws = new WebSocket(`${proto}//${location.host}`);
     ws.binaryType = 'arraybuffer';
 
     const timeout = setTimeout(() => {
@@ -290,18 +267,9 @@ function connectWS() {
       reject(new Error('连接超时'));
     }, 8000);
 
-    ws.onopen = () => {
-      clearTimeout(timeout);
-      log('WebSocket 已连接');
-      resolve();
-    };
-    ws.onerror = (e) => {
-      clearTimeout(timeout);
-      log('WebSocket 错误');
-      reject(new Error('WebSocket 连接失败'));
-    };
+    ws.onopen = () => { clearTimeout(timeout); resolve(); };
+    ws.onerror = (e) => { clearTimeout(timeout); reject(new Error('WebSocket 连接失败')); };
     ws.onclose = () => {
-      log('WebSocket 断开');
       if (playbackStarted) stopPlayback();
       setStatus('error', '连接断开');
     };
@@ -320,51 +288,72 @@ function connectWS() {
 
 // --- Signaling ---
 function handleSignaling(msg) {
-  log('收到消息: ' + msg.type);
   switch (msg.type) {
     case 'joined':
-      // Switch to play view
       document.getElementById('actionArea').classList.add('hidden');
       document.getElementById('playArea').classList.remove('hidden');
       document.getElementById('displayCode').textContent = msg.code;
       setStatus('connected', '已连接，等待音频...');
-      log('已加入房间: ' + msg.code);
       break;
 
     case 'audio-meta':
       remoteSampleRate = msg.sampleRate || 48000;
-      log('收到音频元数据: 采样率=' + remoteSampleRate + 'Hz');
       document.getElementById('statSampleRate').textContent = remoteSampleRate + 'Hz';
 
-      // If user already activated AudioContext (auto-join), auto-play when data arrives
       if (userActivated && audioContext && audioContext.state === 'running') {
         document.getElementById('playBtn').disabled = false;
         document.getElementById('playHint').textContent = '缓冲中...';
         setStatus('buffering', '缓冲中...');
-        log('AudioContext 已激活，等待数据缓冲...');
       } else {
-        // Manual join: enable play button for user to click
         document.getElementById('playBtn').disabled = false;
         document.getElementById('playHint').textContent = '点击播放 ▶';
-        log('请点击播放按钮');
       }
       break;
 
     case 'peer-disconnected':
       stopPlayback();
       setStatus('error', '发送端已断开');
-      log('发送端已断开');
       break;
 
     case 'error':
-      log('错误: ' + msg.message);
       alert(msg.message);
+      break;
+
+    case 'webrtc-ready':
+      // Sender says WebRTC is/will be used — switch analyser to remote stream
+      setupP2PAnalyser(msg);
       break;
   }
 }
 
-// --- Audio Data Handler ---
+// --- WebRTC: Set up analyser from remote stream (for P2P volume display) ---
+function setupP2PAnalyser(msg) {
+  if (!msg.streamId) return;
+  // Try to find a MediaStream with this ID
+  if (audioContext && audioContext.state === 'running') {
+    // We'll set up the analyser from the <audio> element's source
+    const audioEl = document.getElementById('remoteAudio');
+    if (audioEl && audioEl.srcObject) {
+      const stream = audioEl.srcObject;
+      if (stream.id === msg.streamId || true) { // Accept any remote stream
+        p2pMode = true;
+        if (p2pAnalyseCtx) p2pAnalyseCtx.close().catch(() => {});
+        p2pAnalyseCtx = new (window.AudioContext || window.webkitAudioContext)();
+        p2pAnalyseSource = p2pAnalyseCtx.createMediaStreamSource(stream);
+        p2pAnalyser = p2pAnalyseCtx.createAnalyser();
+        p2pAnalyser.fftSize = 256;
+        p2pAnalyseSource.connect(p2pAnalyser);
+        // Replace the main analyser reference
+        analyser = p2pAnalyser;
+      }
+    }
+  }
+}
+
+// --- Audio Data Handler (WebSocket relay) ---
 function handleAudioData(arrayBuffer) {
+  if (p2pMode) return; // Ignore relay data when P2P is active
+
   const int16 = new Int16Array(arrayBuffer);
   const float32 = new Float32Array(int16.length);
   for (let i = 0; i < int16.length; i++) {
@@ -384,22 +373,14 @@ function handleAudioData(arrayBuffer) {
   chunkCount++;
   totalBytes += arrayBuffer.byteLength;
 
-  // Update stats every 20 chunks
   if (chunkCount % 20 === 0) {
     document.getElementById('statChunks').textContent = chunkCount;
     document.getElementById('statBytes').textContent = formatBytes(totalBytes);
   }
 
-  // First data arriving? Log it
-  if (chunkCount === 1) {
-    log('收到第一块音频数据! ' + arrayBuffer.byteLength + ' bytes');
-  }
-
-  // Auto-start playback if user has already activated audio
   if (userActivated && !playbackStarted && audioContext && audioContext.state === 'running') {
     const needed = remoteSampleRate * (INITIAL_BUFFER_MS / 1000);
     if (samplesBuffered >= needed) {
-      log('缓冲足够 (' + samplesBuffered + ' samples / ' + needed + ' needed)，开始播放');
       startPlayback();
     }
   }
@@ -408,26 +389,20 @@ function handleAudioData(arrayBuffer) {
 // --- Playback ---
 async function togglePlay() {
   if (!isPlaying) {
-    // Create/resume AudioContext on user gesture (CRITICAL for mobile)
     if (!audioContext) {
       audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
-      log('AudioContext 创建，采样率: ' + audioContext.sampleRate + 'Hz');
     }
     if (audioContext.state === 'suspended') {
       await audioContext.resume();
-      log('AudioContext 已恢复');
     }
 
     userActivated = true;
     document.getElementById('playHint').textContent = '缓冲中...';
     setStatus('buffering', '缓冲中...');
 
-    // If we already have enough data, start immediately
     const needed = remoteSampleRate * (INITIAL_BUFFER_MS / 1000);
     if (samplesBuffered >= needed) {
       startPlayback();
-    } else {
-      log('等待缓冲... (' + Math.round((samplesBuffered / remoteSampleRate) * 1000) + 'ms / ' + INITIAL_BUFFER_MS + 'ms)');
     }
   } else {
     stopPlayback();
@@ -441,9 +416,7 @@ function startPlayback() {
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
   }
 
-  // If the existing AudioContext sample rate doesn't match, close and recreate
   if (audioContext.sampleRate !== remoteSampleRate) {
-    log('采样率不匹配 (ctx=' + audioContext.sampleRate + ', remote=' + remoteSampleRate + ')，重建 AudioContext');
     const oldCtx = audioContext;
     audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: remoteSampleRate });
     oldCtx.close().catch(() => {});
@@ -474,16 +447,16 @@ function startPlayback() {
 
   processor.connect(audioContext.destination);
 
-  // Volume meter
-  try {
-    const dest = audioContext.createMediaStreamDestination();
-    processor.connect(dest);
-    const source = audioContext.createMediaStreamSource(dest.stream);
-    analyser = audioContext.createAnalyser();
-    analyser.fftSize = 256;
-    source.connect(analyser);
-  } catch (err) {
-    log('音量表设置失败: ' + err.message);
+  // Volume meter for WebSocket relay mode
+  if (!p2pMode) {
+    try {
+      const dest = audioContext.createMediaStreamDestination();
+      processor.connect(dest);
+      const source = audioContext.createMediaStreamSource(dest.stream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+    } catch (_) {}
   }
 
   // Wave animation
@@ -507,16 +480,19 @@ function startPlayback() {
   document.getElementById('volumeDisplay').classList.remove('hidden');
   document.getElementById('statsPanel').classList.remove('hidden');
   setStatus('playing', '正在播放 🎵');
-  log('播放已开始');
 }
 
 function stopPlayback() {
   if (processor) { processor.disconnect(); processor = null; }
   if (volumeAnimFrame) { cancelAnimationFrame(volumeAnimFrame); volumeAnimFrame = null; }
+  if (p2pAnalyseCtx) { p2pAnalyseCtx.close().catch(() => {}); p2pAnalyseCtx = null; }
+  p2pAnalyseSource = null;
+  p2pAnalyser = null;
   analyser = null;
 
   playbackStarted = false;
   isPlaying = false;
+  p2pMode = false;
   ringBuffer = null;
   bufferWritePos = 0;
   bufferReadPos = 0;
@@ -533,7 +509,10 @@ function stopPlayback() {
 }
 
 function updateVolume() {
-  if (!analyser) return;
+  if (!analyser) {
+    volumeAnimFrame = requestAnimationFrame(updateVolume);
+    return;
+  }
   const data = new Uint8Array(analyser.frequencyBinCount);
   analyser.getByteFrequencyData(data);
   const avg = data.reduce((a, b) => a + b, 0) / data.length;
