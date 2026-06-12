@@ -370,6 +370,7 @@ function handleWebRTCOffer(msg) {
       stopRelayPlayback();
     }
     startP2PPlayback();
+  };
 
   p2pPC.onicecandidate = (e) => {
     if (e.candidate && ws.readyState === 1) {
