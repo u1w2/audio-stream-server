@@ -431,15 +431,8 @@ function updateDeviceMode(deviceId, mode) {
 }
 
 function updateRelayState() {
-  const entries = Object.values(deviceList);
-  if (entries.length === 0) return;
-  const allP2P = entries.every(d => d.mode === 'p2p');
-  const anyRelay = entries.some(d => d.mode === 'relay' || d.mode === 'connecting');
-  if (allP2P) {
-    relayEnabled = false;
-  } else if (anyRelay) {
-    relayEnabled = true;
-  }
+  // 永远保持 relay 开启，P2P 只是优化，不关中继
+  relayEnabled = true;
 }
 
 function cleanupPeerConnection(deviceId) {
