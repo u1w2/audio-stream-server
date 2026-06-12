@@ -424,8 +424,8 @@ function startP2P(deviceId) {
   peerConnections[deviceId] = pc;
 
   // Add local audio track
-  if (localAudioTrack) {
-    pc.addTrack(localAudioTrack, new MediaStream([localAudioTrack]));
+  if (localAudioTrack && audioStream) {
+    pc.addTrack(localAudioTrack, audioStream);
   }
 
   // ICE candidate -> server -> receiver
