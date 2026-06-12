@@ -129,7 +129,7 @@
     <div class="receiver-url" id="receiverUrl" onclick="copyUrl()" title="点击复制">加载中...</div>
 
     <div class="conn-badge" id="connBadge">
-      📱 <span id="connCount">0</span> 个设备已连接
+      📱 <span id="connCount"></span> 个设备已连接
     </div>
 
     <div id="deviceList" style="margin:12px 0; text-align:left;">
@@ -261,7 +261,7 @@ function handleSignaling(msg) {
       const devId = msg.receiverId || ('device-' + (deviceCounter + 1));
       deviceCounter++;
       deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
-      updateConnCount();
+      console.log('[DBG] peer-ready:', devId, 'deviceList:', JSON.stringify(Object.keys(deviceList)));
       updateDeviceList();
       if (localAudioTrack) {
         startP2P(devId);
@@ -298,9 +298,11 @@ function handleSignaling(msg) {
       break;
 
     case 'peer-left': {
+      console.log('[DBG] peer-left: receiverId=' + msg.receiverId + ' deviceList:', JSON.stringify(Object.keys(deviceList)));
       if (msg.receiverId && deviceList[msg.receiverId]) {
         cleanupPeerConnection(msg.receiverId);
         delete deviceList[msg.receiverId];
+        console.log('[DBG] matched and deleted');
       } else {
         const keys = Object.keys(deviceList);
         if (keys.length > 0) {
@@ -308,7 +310,6 @@ function handleSignaling(msg) {
           delete deviceList[keys[0]];
         }
       }
-      updateConnCount();
       updateDeviceList();
       if (msg.connections === 0) {
         document.getElementById('btnStop').classList.add('hidden');
@@ -321,7 +322,6 @@ function handleSignaling(msg) {
       Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
       deviceList = {};
       deviceCounter = 0;
-      updateConnCount();
       updateDeviceList();
       isStreaming = false;
       relayEnabled = true;
@@ -346,13 +346,14 @@ function updateDeviceList() {
   const entries = Object.entries(deviceList);
   if (entries.length === 0) {
     container.innerHTML = '';
-    return;
+  } else {
+    container.innerHTML = entries.map(([id, dev]) => {
+      return `<div class="device-item">
+        <span class="device-id">设备 ${dev.num}</span>
+      </div>`;
+    }).join('');
   }
-  container.innerHTML = entries.map(([id, dev]) => {
-    return `<div class="device-item">
-      <span class="device-id">设备 ${dev.num}</span>
-    </div>`;
-  }).join('');
+  updateConnCount();
 }
 
 function updateConnCount() {
