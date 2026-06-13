@@ -53,6 +53,14 @@
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-danger { background: #dc2626; color: white; }
   .btn-danger:hover { background: #b91c1c; }
+  .br-label {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 6px 16px; border-radius: 8px; cursor: pointer;
+    font-size: 13px; font-weight: 500; transition: all 0.15s;
+    background: rgba(255,255,255,0.06); color: #999; border: 1px solid transparent;
+  }
+  .br-label:hover { background: rgba(255,255,255,0.1); color: #ccc; }
+  .br-label.selected { background: rgba(102,126,234,0.2); color: #667eea; border-color: #667eea66; }
   .hidden { display: none !important; }
   .device-item {
     display: flex; align-items: center; justify-content: space-between;
@@ -81,6 +89,16 @@
     ⚠️ <strong>浏览器安全限制：</strong>当前页面非安全上下文，无法捕获音频。<br><br>
     请改用 <strong>localhost</strong> 访问：<br>
     <a href="#" id="localhostLink"><code id="localhostUrl"></code></a>
+  </div>
+
+  <div id="bitrateSelector" class="hidden" style="margin-bottom:16px; display:flex; flex-direction:column; align-items:center; gap:6px;">
+    <label style="font-size:13px; color:#888;">音质选择</label>
+    <div style="display:flex; gap:8px;">
+      <label class="br-label" data-value="32000" onclick="selectBitrate(this)">低</label>
+      <label class="br-label" data-value="64000" onclick="selectBitrate(this)">中</label>
+      <label class="br-label selected" data-value="128000" onclick="selectBitrate(this)">高</label>
+      <label class="br-label" data-value="256000" onclick="selectBitrate(this)">极高</label>
+    </div>
   </div>
 
   <div id="stepCreate">
@@ -114,6 +132,7 @@ let localAudioTrack = null;
 let isStreaming = false;
 let deviceCounter = 0;
 let deviceList = {};
+let selectedBitrate = 128000; // 默认高音质 128kbps
 
 // WebRTC
 let peerConnections = {};
@@ -135,6 +154,23 @@ function checkSecureContext() {
   return true;
 }
 checkSecureContext();
+
+// --- 码率选择 ---
+function selectBitrate(el) {
+  document.querySelectorAll('.br-label').forEach(l => l.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedBitrate = parseInt(el.dataset.value);
+  // 如果已有连接，实时应用码率
+  Object.entries(peerConnections).forEach(([id, pc]) => {
+    const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+    if (sender) {
+      const params = sender.getParameters();
+      if (!params.encodings) params.encodings = [{}];
+      params.encodings[0].maxBitrate = selectedBitrate;
+      sender.setParameters(params).catch(() => {});
+    }
+  });
+}
 
 // --- WebSocket (signaling only) ---
 function connectWS() {
@@ -193,6 +229,8 @@ function handleSignaling(msg) {
       roomCode = msg.code;
       document.getElementById('stepCreate').classList.add('hidden');
       document.getElementById('stepStreaming').classList.remove('hidden');
+      document.getElementById('bitrateSelector').classList.remove('hidden');
+      document.getElementById('tipBox').classList.add('hidden');
       setStatus('connected', '房间已创建，等待手机扫码...');
 
       if (msg.qrDataUrl) {
@@ -275,6 +313,28 @@ function handleSignaling(msg) {
       setStatus('connected', '设备已断开，等待重新扫码...');
       break;
 
+    case 'bitrate-change': {
+      // receiver 请求改变码率：刷新所有 peer 的编码参数
+      const br = msg.bitrate;
+      selectedBitrate = br;
+      // 同步 sender 端 UI
+      document.querySelectorAll('.br-label').forEach(l => l.classList.remove('selected'));
+      const match = document.querySelector(`.br-label[data-value="${br}"]`);
+      if (match) match.classList.add('selected');
+      // 应用到所有连接
+      Object.entries(peerConnections).forEach(([id, pc]) => {
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+        if (sender) {
+          const params = sender.getParameters();
+          if (!params.encodings) params.encodings = [{}];
+          params.encodings[0].maxBitrate = br;
+          sender.setParameters(params).catch(() => {});
+        }
+      });
+      console.log(`[Bitrate] Changed to ${br} bps (requested by ${msg.receiverId})`);
+      break;
+    }
+
     case 'error':
       alert(msg.message);
       break;
@@ -292,6 +352,20 @@ function startP2P(deviceId) {
   if (localAudioTrack) {
     pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
   }
+
+  // 设置编码码率
+  const applyBitrate = () => {
+    const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+    if (sender) {
+      const params = sender.getParameters();
+      if (!params.encodings) params.encodings = [{}];
+      params.encodings[0].maxBitrate = selectedBitrate;
+      sender.setParameters(params).catch(() => {});
+    }
+  };
+  // 立即试一次，连接建立后再试一次确保生效
+  setTimeout(applyBitrate, 100);
+  setTimeout(applyBitrate, 2000);
 
   pc.onicecandidate = (e) => {
     if (e.candidate && ws.readyState === 1) {

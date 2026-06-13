@@ -43,6 +43,16 @@
   .btn-connect:hover { opacity: 0.9; }
   .btn-connect:disabled { opacity: 0.4; cursor: not-allowed; }
 
+  .br-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 5px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);
+    background: rgba(255,255,255,0.04); color: #999;
+    font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
+    min-width: 36px;
+  }
+  .br-btn:hover { background: rgba(255,255,255,0.1); color: #ccc; }
+  .br-btn.active { background: rgba(74,222,128,0.15); color: #4ade80; border-color: #4ade8066; }
+
   #playQrContainer {
     margin: 20px 0;
   }
@@ -78,6 +88,15 @@
     </div>
     <p style="color:#666; font-size:12px;" id="playHint">连接中...</p>
     <audio id="p2pAudio" autoplay style="display:none;"></audio>
+    <div id="bitrateControl" class="hidden" style="margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.06);">
+      <label style="font-size:12px; color:#888; display:block; margin-bottom:8px;">音质</label>
+      <div style="display:flex; gap:6px; justify-content:center;">
+        <button class="br-btn" data-br="32000" onclick="changeBitrate(this)">低</button>
+        <button class="br-btn" data-br="64000" onclick="changeBitrate(this)">中</button>
+        <button class="br-btn active" data-br="128000" onclick="changeBitrate(this)">高</button>
+        <button class="br-btn" data-br="256000" onclick="changeBitrate(this)">极高</button>
+      </div>
+    </div>
   </div>
 
   <div class="tip">💡 点击按钮即可开始收听。请确保手机音量已打开。</div>
@@ -197,6 +216,19 @@ async function manualJoin() {
   }
 }
 
+// --- 码率控制 ---
+let currentBitrate = 128000;
+
+function changeBitrate(btn) {
+  document.querySelectorAll('.br-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  currentBitrate = parseInt(btn.dataset.br);
+  // 通过信令通知 sender 调整码率
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: currentBitrate }));
+  }
+}
+
 // --- WebSocket (signaling only) ---
 function connectWS() {
   return new Promise((resolve, reject) => {
@@ -212,17 +244,16 @@ function connectWS() {
     ws.onopen = () => { clearTimeout(timeout); resolve(); };
     ws.onerror = (e) => { clearTimeout(timeout); reject(new Error('WebSocket 连接失败')); };
     ws.onclose = () => {
-      if (isPlaying) stopPlayback();
-      setStatus('error', '连接断开');
-      // 自动重连
-      if (roomCode && !isPlaying) {
+      setStatus('connected', '信令断开，音频继续');
+      // P2P 持续播放，但自动重连信令通道
+      if (roomCode) {
         setTimeout(() => {
           if (ws.readyState > 1) {
             connectWS().then(() => {
               ws.send(JSON.stringify({ type: 'join', code: roomCode }));
             }).catch(() => {});
           }
-        }, 2000);
+        }, 3000);
       }
     };
 
@@ -240,6 +271,7 @@ function handleSignaling(msg) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
       document.getElementById('playHint').textContent = '等待音频...';
+      document.getElementById('bitrateControl').classList.remove('hidden');
       setStatus('connected', '已连接，等待音频...');
       if (msg.qrDataUrl) {
         document.getElementById('qrImage').src = msg.qrDataUrl;

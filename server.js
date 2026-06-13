@@ -140,6 +140,20 @@ wss.on('connection', (ws) => {
       case 'leave':
         break;
 
+      case 'bitrate-change': {
+        // receiver → sender: 请求改变编码码率
+        if (!currentRoom || !rooms[currentRoom]) return;
+        const room = rooms[currentRoom];
+        if (room.sender && room.sender.readyState === 1) {
+          room.sender.send(JSON.stringify({
+            type: 'bitrate-change',
+            bitrate: msg.bitrate,
+            receiverId: ws._receiverId,
+          }));
+        }
+        break;
+      }
+
       case 'webrtc-offer':
       case 'webrtc-answer':
       case 'webrtc-ice': {
