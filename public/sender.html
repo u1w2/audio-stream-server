@@ -256,7 +256,7 @@ function startRelay(stream) {
   try {
     relayRecorder = new MediaRecorder(stream, {
       mimeType,
-      audioBitsPerSecond: 8000, // 8kbps 省流保底
+      audioBitsPerSecond: 16000, // 16kbps 省流保底
     });
     relayRecorder.ondataavailable = (e) => {
       if (e.data.size > 0 && ws && ws.readyState === 1) {
@@ -265,7 +265,7 @@ function startRelay(stream) {
     };
     // 每 100ms 发一次数据，降低延迟
     relayRecorder.start(100);
-    console.log('[Relay] Started at 8kbps');
+    console.log('[Relay] Started at 16kbps');
   } catch (err) {
     console.log('[Relay] Failed:', err.message);
     relayRecorder = null;
@@ -436,11 +436,11 @@ function createPC(deviceId, useTURN) {
       if (iceState === 'relay' && useTURN) {
         // 走了 TURN 中继 → 锁码率，启动 P2P 重试
         console.log('[Sender] 走TURN中继，锁码率');
-        selectedBitrate = 8000;
+        selectedBitrate = 16000;
         applyBitrate();
         // 通知 receiver 当前是中继模式
         if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 8000 }));
+          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
         }
         // 启动定期 P2P 重试
         startP2PRetry(deviceId);
