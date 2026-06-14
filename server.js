@@ -72,17 +72,12 @@ wss.on('connection', (ws) => {
       if (currentRoom && rooms[currentRoom]) {
         const room = rooms[currentRoom];
         if (currentRole === 'sender') {
-          if (!room._binaryCount) room._binaryCount = 0;
-          room._binaryCount++;
-          if (room._binaryCount % 50 === 0) console.log(`[Relay] Room ${currentRoom}: ${room._binaryCount} binary chunks relayed, ${room.receivers.length} receivers`);
           // 广播给所有 receiver
           for (const r of room.receivers) {
             if (r.readyState === 1) {
               try { r.send(raw); } catch(_) {}
             }
           }
-        } else {
-          // receiver 发二进制数据？忽略
         }
       }
       return;
@@ -179,9 +174,6 @@ wss.on('connection', (ws) => {
       case 'reconnect-relay': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
-        if (msg.type === 'webrtc-offer') console.log(`[Signaling] webrtc-offer from ${currentRole}, targetReceiverId: ${msg.targetReceiverId}, useTURN: ${msg.useTURN}, receivers: ${room.receivers.length}`);
-        if (msg.type === 'webrtc-answer') console.log(`[Signaling] webrtc-answer from ${currentRole}, receiverId: ${msg.receiverId}`);
-        if (msg.type === 'webrtc-ice') console.log(`[Signaling] webrtc-ice from ${currentRole}, receiverId: ${msg.receiverId || ws._receiverId}`);
 
         if (msg.targetReceiverId && room.receivers) {
           const target = room.receivers.find(r => r._receiverId === msg.targetReceiverId);
