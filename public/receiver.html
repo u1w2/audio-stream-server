@@ -266,9 +266,9 @@ async function manualJoin() {
 }
 
 // --- 码率控制（点击式阶梯） ---
-const BR_LEVELS = [750000, 256000, 128000, 64000, 32000, 16000];
-const BR_TAGS = ['无损', '高', '中', '低', '极低', '省流'];
-const BR_SHORT = ['750K', '256K', '128K', '64K', '32K', '16K'];
+const BR_LEVELS = [750000, 256000, 128000, 64000, 32000, 16000, 8000];
+const BR_TAGS = ['无损', '高', '中', '低', '极低', '省流', '超省流'];
+const BR_SHORT = ['750K', '256K', '128K', '64K', '32K', '16K', '8K'];
 let currentBitrate = 128000;
 let currentBrIndex = 2; // 默认128k
 let userBitrateOverride = false;
@@ -401,21 +401,16 @@ function detectRelayMode() {
       });
       if (hasRelay) {
         _relayDetected = true;
-        console.log('[Relay] 走 TURN 中继，强制 16kbps');
-        // 禁用音质选择，锁定省流
-        document.querySelectorAll('.br-toggle-item').forEach(el => el.classList.add('disabled'));
+        console.log('[Relay] 走 TURN 中继，中继流固定 16kbps，P2P 码率可调');
+        // 不再禁用音质选择——中继流固定16kbps，按钮调的是P2P Opus编码器
+        // 但把当前选中设为省流档（因为中继是16kbps，视觉上能看出当前在省流）
         currentBitrate = 16000;
         currentBrIndex = BR_LEVELS.indexOf(16000);
         updateBrUI(currentBrIndex);
-        userBitrateOverride = true;
-        stopAdapt();
+        // 通知 sender 中继模式（仅记录，sender 知道中继流固定16kbps）
         if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
+          ws.send(JSON.stringify({ type: 'connection-status', receiverId: myReceiverId, mode: 'relay' }));
         }
-        setTimeout(() => {
-          if (ws && ws.readyState === 1)
-            ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
-        }, 1000);
       } else {
         console.log('[Relay] 尝试' + attempt + ': P2P直连');
         // 还没稳定，稍后重试
@@ -492,7 +487,11 @@ function handleSignaling(msg) {
       initRelayPlayback();
       // 5秒后如果 P2P 还没连上，切换到中继模式
       setTimeout(() => {
-        if (!p2pPC && !isPlaying) {
+        const p2pConnected = p2pPC && (p2pPC.connectionState === 'connected' || p2pPC.connectionState === 'completed');
+        if (!p2pConnected && !isPlaying) {
+          console.log('[Relay] 5秒P2P未连通，切换到中继模式');
+          // 如果有 p2pPC 但没连上，关闭它让中继走
+          if (p2pPC) { p2pPC.close(); p2pPC = null; pendingCandidates = []; }
           relayMode = true;
           document.getElementById('playHint').textContent = '中继模式（低码率）';
           setStatus('playing', '中继播放 📡');
@@ -504,6 +503,25 @@ function handleSignaling(msg) {
       }, 5000);
       break;
     }
+
+    case 'bitrate-change':
+      // sender 通知实际码率（中继模式下可能被拒绝，回退到16kbps）
+      if (msg.bitrate) {
+        const idx = BR_LEVELS.indexOf(msg.bitrate);
+        if (idx !== -1) {
+          currentBitrate = msg.bitrate;
+          currentBrIndex = idx;
+          updateBrUI(idx);
+          console.log(`[Bitrate] 被锁定为: ${BR_TAGS[idx]}`);
+        }
+      }
+      break;
+
+    case 'connection-status':
+      if (msg.mode === 'relay') {
+        console.log('[Relay] 中继模式确认');
+      }
+      break;
 
     case 'reconnect-p2p':
       // sender 想切回 P2P，重置 PC 等新 offer
@@ -587,19 +605,14 @@ function handleWebRTCOffer(msg) {
       if (iceState === 'relay') {
         console.log('[ICE] iceConnectionState=relay，确认走TURN中继');
         _relayDetected = true;
-        // 禁用音质选择
-        document.querySelectorAll('.br-toggle-item').forEach(el => el.classList.add('disabled'));
+        // 中继流固定16kbps，按钮仍然可调（调的是P2P Opus编码器）
         const targetBr = 16000;
         currentBitrate = targetBr;
         userBitrateOverride = true;
         stopAdapt();
         if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: targetBr }));
+          ws.send(JSON.stringify({ type: 'connection-status', receiverId: myReceiverId, mode: 'relay' }));
         }
-        setTimeout(() => {
-          if (ws && ws.readyState === 1)
-            ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
-        }, 1000);
       } else {
         // 非 relay 状态下再走 getStats 检测兜底
         detectRelayMode();

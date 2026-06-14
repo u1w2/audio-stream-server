@@ -373,8 +373,17 @@ function handleSignaling(msg) {
       break;
 
     case 'bitrate-change': {
-      // receiver 请求改变码率：刷新所有 peer 的编码参数
+      // receiver 请求改变码率
       const br = msg.bitrate;
+      // 如果走中继，忽略码率调节（中继流固定16kbps保护服务器带宽）
+      if (_relayDetectedSender) {
+        console.log(`[Bitrate] 中继模式，忽略码率 ${br}，保持16kbps`);
+        // 但通知 receiver 实际还是16kbps
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
+        }
+        break;
+      }
       selectedBitrate = br;
       // 应用到所有连接
       Object.entries(peerConnections).forEach(([id, pc]) => {
@@ -435,14 +444,10 @@ function createPC(deviceId, useTURN) {
       console.log('[Sender] iceConnectionState:', iceState, 'useTURN:', useTURN);
       if (iceState === 'relay' && useTURN) {
         // 走了 TURN 中继 → 锁码率，启动 P2P 重试
-        console.log('[Sender] 走TURN中继，锁码率');
+        console.log('[Sender] 走TURN中继，锁16kbps');
+        _relayDetectedSender = true;
         selectedBitrate = 16000;
         applyBitrate();
-        // 通知 receiver 当前是中继模式
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
-        }
-        // 启动定期 P2P 重试
         startP2PRetry(deviceId);
       } else if (!useTURN && iceState === 'connected') {
         // 纯 STUN 连接成功 → P2P 通了！恢复码率
