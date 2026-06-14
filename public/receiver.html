@@ -43,15 +43,20 @@
   .btn-connect:hover { opacity: 0.9; }
   .btn-connect:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  .br-btn {
-    display: inline-flex; align-items: center; justify-content: center;
-    padding: 5px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);
-    background: rgba(255,255,255,0.04); color: #999;
-    font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
-    min-width: 36px;
+  .br-toggle { display: flex; gap: 3px; justify-content: center; align-items: stretch; flex-wrap: nowrap; margin: 8px 0; }
+  .br-toggle-item {
+    flex: 1; padding: 8px 0; border-radius: 8px; border: 1px solid rgba(255,255,255,0.06);
+    background: rgba(255,255,255,0.03); color: #888; font-size: 8px; font-weight: 500;
+    cursor: pointer; text-align: center; transition: all 0.15s; min-width: 0;
+    -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+    display: flex; flex-direction: column; align-items: center; gap: 1px;
+    user-select: none;
   }
-  .br-btn:hover { background: rgba(255,255,255,0.1); color: #ccc; }
-  .br-btn.active { background: rgba(74,222,128,0.15); color: #4ade80; border-color: #4ade8066; }
+  .br-toggle-item .br-tag { font-size: 10px; font-weight: 500; opacity: 0.7; }
+  .br-toggle-item:active { transform: scale(0.95); }
+  .br-toggle-item.active { background: rgba(74,222,128,0.15); color: #4ade80; border-color: #4ade8066; }
+  .br-toggle-item.active .br-tag { opacity: 0.8; }
+  .br-toggle-item.disabled { opacity: 0.25; pointer-events: none; }
 
   #playQrContainer {
     margin: 20px 0;
@@ -89,17 +94,12 @@
     <p style="color:#666; font-size:12px;" id="playHint">连接中...</p>
     <audio id="p2pAudio" autoplay style="display:none;"></audio>
     <div id="bitrateControl" class="hidden" style="margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.06);">
-      <label style="font-size:12px; color:#888; display:block; margin-bottom:8px;">音质</label>
-      <div style="display:flex; gap:6px; justify-content:center;">
-        <button class="br-btn" data-br="32000" onclick="changeBitrate(this)">低</button>
-        <button class="br-btn" data-br="64000" onclick="changeBitrate(this)">中</button>
-        <button class="br-btn active" data-br="128000" onclick="changeBitrate(this)">高</button>
-        <button class="br-btn" data-br="256000" onclick="changeBitrate(this)">极高</button>
-      </div>
+      <label style="font-size:12px; color:#888; display:block; margin-bottom:6px;">音质</label>
+      <div id="brToggle" class="br-toggle"></div>
     </div>
   </div>
 
-  <div class="tip">💡 点击按钮即可开始收听。请确保手机音量已打开。</div>
+  <div class="tip hidden">💡 点击按钮即可开始收听。请确保手机音量已打开。</div>
 </div>
 
 <script>
@@ -114,10 +114,59 @@ let p2pPC = null;
 let p2pRemoteStream = null;
 let p2pAudioEl = null;
 let pendingCandidates = []; // 缓存 p2pPC 创建前到达的 ICE candidate
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'turn:39.101.174.208:3478', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
+  { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
+];
 
 // Store code from URL
 let pendingCode = null;
+
+// 中继播放相关
+let relayMediaSource = null;
+let relaySourceBuffer = null;
+let relayPlaying = false;
+let relayDataQueue = [];
+let relayMode = false; // true = 使用中继音频, false = 使用P2P
+
+function initRelayPlayback() {
+  if (relayMediaSource || relayPlaying) return;
+  try {
+    relayMediaSource = new MediaSource();
+    relayMediaSource.onsourceopen = () => {
+      const sb = relayMediaSource.addSourceBuffer('audio/webm;codecs=opus');
+      relaySourceBuffer = sb;
+      sb.mode = 'sequence';
+      // 消费队列中的数据
+      while (relayDataQueue.length > 0) {
+        const chunk = relayDataQueue.shift();
+        try { sb.appendBuffer(chunk); } catch(_) {}
+      }
+    };
+    const audioEl = document.getElementById('p2pAudio');
+    audioEl.src = URL.createObjectURL(relayMediaSource);
+  } catch (err) {
+    console.log('[Relay] Init failed:', err.message);
+  }
+}
+
+function appendRelayData(data) {
+  if (relaySourceBuffer && !relaySourceBuffer.updating) {
+    try {
+      relaySourceBuffer.appendBuffer(data);
+    } catch(_) {
+      relayDataQueue.push(data);
+    }
+  } else {
+    relayDataQueue.push(data);
+  }
+  if (!relayPlaying) {
+    relayPlaying = true;
+    const audioEl = document.getElementById('p2pAudio');
+    audioEl.play().catch(() => {});
+  }
+}
 
 // --- Initialize UI based on URL params ---
 const urlParams = new URLSearchParams(window.location.search);
@@ -216,17 +265,171 @@ async function manualJoin() {
   }
 }
 
-// --- 码率控制 ---
+// --- 码率控制（点击式阶梯） ---
+const BR_LEVELS = [750000, 256000, 128000, 64000, 32000, 16000];
+const BR_TAGS = ['无损', '高', '中', '低', '极低', '省流'];
+const BR_SHORT = ['750K', '256K', '128K', '64K', '32K', '16K'];
 let currentBitrate = 128000;
+let currentBrIndex = 2; // 默认128k
+let userBitrateOverride = false;
+let adaptEnabled = false;
+let adaptTimer = null;
+let stallCount = 0;
 
-function changeBitrate(btn) {
-  document.querySelectorAll('.br-btn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  currentBitrate = parseInt(btn.dataset.br);
-  // 通过信令通知 sender 调整码率
+function buildBrToggle() {
+  const container = document.getElementById('brToggle');
+  container.innerHTML = BR_LEVELS.map((br, i) => {
+    const active = br === currentBitrate ? ' active' : '';
+    return `<div class="br-toggle-item${active}" data-index="${i}" onclick="onBrClick(this)">
+      <span class="br-tag">${BR_TAGS[i]}</span>
+    </div>`;
+  }).join('');
+}
+
+function onBrClick(el) {
+  const index = parseInt(el.dataset.index);
+  userBitrateOverride = true;
+  stopAdapt();
+  currentBitrate = BR_LEVELS[index];
+  currentBrIndex = index;
+  updateBrUI(index);
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: currentBitrate }));
   }
+  console.log(`[Bitrate] 手动切到: ${BR_TAGS[index]} (${BR_SHORT[index]})`);
+}
+
+function updateBrUI(index) {
+  document.querySelectorAll('.br-toggle-item').forEach(el => {
+    const i = parseInt(el.dataset.index);
+    el.classList.toggle('active', i === index);
+  });
+}
+
+function sendBitrate(br) {
+  currentBitrate = br;
+  const idx = BR_LEVELS.indexOf(br);
+  if (idx !== -1) {
+    currentBrIndex = idx;
+    updateBrUI(idx);
+  }
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: br }));
+  }
+}
+
+function onStall() {
+  if (!adaptEnabled || userBitrateOverride) return;
+  stallCount++;
+  if (stallCount >= 2 && currentBrIndex < BR_LEVELS.length - 1) {
+    currentBrIndex++;
+    currentBitrate = BR_LEVELS[currentBrIndex];
+    updateBrUI(currentBrIndex);
+    sendBitrate(currentBitrate);
+    stallCount = 0;
+    console.log(`[Adapt] 降码率: ${BR_TAGS[currentBrIndex]} (${BR_SHORT[currentBrIndex]})`);
+  }
+}
+
+function onGood() {
+  if (!adaptEnabled || userBitrateOverride) return;
+  stallCount = 0;
+}
+
+function maybeUpgrade() {
+  if (!adaptEnabled || userBitrateOverride) return;
+  if (currentBrIndex > 0) {
+    currentBrIndex--;
+    currentBitrate = BR_LEVELS[currentBrIndex];
+    updateBrUI(currentBrIndex);
+    sendBitrate(currentBitrate);
+    console.log(`[Adapt] 升码率: ${BR_TAGS[currentBrIndex]} (${BR_SHORT[currentBrIndex]})`);
+  }
+}
+
+function startAdapt() {
+  adaptEnabled = true;
+  userBitrateOverride = false;
+  stallCount = 0;
+  if (adaptTimer) clearInterval(adaptTimer);
+  adaptTimer = setInterval(maybeUpgrade, 30000);
+}
+
+function stopAdapt() {
+  adaptEnabled = false;
+  if (adaptTimer) { clearInterval(adaptTimer); adaptTimer = null; }
+}
+
+// --- TURN relay 检测：走服务器流量时强制 16kbps ---
+let _relayDetected = false;
+function detectRelayMode() {
+  if (!p2pPC || _relayDetected) return;
+  const doCheck = (attempt) => {
+    if (!p2pPC || _relayDetected) return;
+    p2pPC.getStats().then(stats => {
+      let hasRelay = false;
+      // 调试日志
+      stats.forEach(report => {
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          console.log('[DBG] Succeeded pair:', JSON.stringify({
+            localCandidateType: report.localCandidateType,
+            remoteCandidateType: report.remoteCandidateType,
+            nominated: report.nominated,
+            priority: report.priority
+          }));
+        }
+        if (report.candidateType === 'relay' || report.type === 'relay') {
+          console.log('[DBG] Relay candidate found:', JSON.stringify({
+            type: report.type,
+            candidateType: report.candidateType,
+            ip: report.ip,
+            address: report.address,
+            port: report.port
+          }));
+        }
+        if (report.ip === '39.101.174.208' || report.address === '39.101.174.208') {
+          console.log('[DBG] TURN server IP match');
+        }
+      });
+      // 检测逻辑：只要满足任一条件就算 relay
+      stats.forEach(report => {
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          if (report.localCandidateType === 'relay' || report.remoteCandidateType === 'relay') hasRelay = true;
+        }
+        if (report.candidateType === 'relay' || report.type === 'relay') hasRelay = true;
+        if (report.ip === '39.101.174.208' || report.address === '39.101.174.208') hasRelay = true;
+      });
+      if (hasRelay) {
+        _relayDetected = true;
+        console.log('[Relay] 走 TURN 中继，强制 16kbps');
+        // 禁用音质选择，锁定省流
+        document.querySelectorAll('.br-toggle-item').forEach(el => el.classList.add('disabled'));
+        currentBitrate = 16000;
+        currentBrIndex = BR_LEVELS.indexOf(16000);
+        updateBrUI(currentBrIndex);
+        userBitrateOverride = true;
+        stopAdapt();
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
+        }
+        setTimeout(() => {
+          if (ws && ws.readyState === 1)
+            ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
+        }, 1000);
+      } else {
+        console.log('[Relay] 尝试' + attempt + ': P2P直连');
+        // 还没稳定，稍后重试
+        if (attempt < 3) {
+          setTimeout(() => doCheck(attempt + 1), 2000);
+        }
+      }
+    }).catch(() => {
+      if (attempt < 3) {
+        setTimeout(() => doCheck(attempt + 1), 2000);
+      }
+    });
+  };
+  doCheck(1);
 }
 
 // --- WebSocket (signaling only) ---
@@ -258,6 +461,14 @@ function connectWS() {
     };
 
     ws.onmessage = (e) => {
+      // 二进制数据 = 中继音频
+      if (e.data instanceof ArrayBuffer || e.data instanceof Blob) {
+        const data = e.data instanceof Blob ? e.data : new Blob([e.data]);
+        if (relayMediaSource || relayDataQueue.length > 0) {
+          data.arrayBuffer().then(buf => appendRelayData(buf));
+        }
+        return;
+      }
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
       handleSignaling(msg);
@@ -272,12 +483,44 @@ function handleSignaling(msg) {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
+      buildBrToggle(); // 构建音质阶梯控件
       setStatus('connected', '已连接，等待音频...');
       if (msg.qrDataUrl) {
         document.getElementById('qrImage').src = msg.qrDataUrl;
       }
+      // 开启中继保底：初始化 MediaSource 等待音频数据
+      initRelayPlayback();
+      // 5秒后如果 P2P 还没连上，切换到中继模式
+      setTimeout(() => {
+        if (!p2pPC && !isPlaying) {
+          relayMode = true;
+          document.getElementById('playHint').textContent = '中继模式（低码率）';
+          setStatus('playing', '中继播放 📡');
+          isPlaying = true;
+          // 尝试播放已缓存的中继数据
+          const audioEl = document.getElementById('p2pAudio');
+          audioEl.play().catch(() => {});
+        }
+      }, 5000);
       break;
     }
+
+    case 'reconnect-p2p':
+      // sender 想切回 P2P，重置 PC 等新 offer
+      console.log('[Receiver] 收到 reconnect-p2p，重建纯STUN连接');
+      if (p2pPC) { p2pPC.close(); p2pPC = null; }
+      pendingCandidates = [];
+      _relayDetected = false;
+      // 隐藏中继状态，等待新连接
+      document.getElementById('playHint').textContent = '切换P2P连接...';
+      break;
+
+    case 'reconnect-relay':
+      // P2P 失败，用 TURN 重建
+      console.log('[Receiver] 收到 reconnect-relay，重建TURN连接');
+      if (p2pPC) { p2pPC.close(); p2pPC = null; }
+      pendingCandidates = [];
+      break;
 
     case 'webrtc-offer':
       handleWebRTCOffer(msg);
@@ -307,9 +550,20 @@ function handleSignaling(msg) {
 
 // --- WebRTC: Handle incoming offer from sender ---
 function handleWebRTCOffer(msg) {
-  if (p2pPC) return;
+  // 如果已有 PC 但收到新 offer（reconnect 场景），先清理旧的
+  if (p2pPC) {
+    console.log('[Receiver] 收到新offer，替换旧连接');
+    p2pPC.close();
+    p2pPC = null;
+    isPlaying = false;
+    relayMode = false;
+    relayPlaying = false;
+  }
 
-  p2pPC = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  // 根据 offer 中的 useTURN 标记决定 ICE 配置
+  const servers = msg.useTURN ? ICE_SERVERS : [{ urls: 'stun:stun.l.google.com:19302' }];
+  console.log('[Receiver] 创建连接, useTURN:', !!msg.useTURN);
+  p2pPC = new RTCPeerConnection({ iceServers: servers });
 
   p2pPC.ontrack = (e) => {
     p2pRemoteStream = e.streams[0];
@@ -323,12 +577,41 @@ function handleWebRTCOffer(msg) {
   };
 
   p2pPC.onconnectionstatechange = () => {
-    if (p2pPC.connectionState === 'failed' || p2pPC.connectionState === 'disconnected') {
+    const state = p2pPC.connectionState;
+    if (state === 'connected' || state === 'completed') {
+      console.log('[ICE] P2P连接成功', p2pPC.iceConnectionState);
+      // iceConnectionState 为 'connected' 是 P2P，'relay' 是中继
+      const iceState = p2pPC.iceConnectionState;
+      console.log('[ICE] iceConnectionState:', iceState);
+      // 如果 iceConnectionState === 'relay'，直接判定走 TURN
+      if (iceState === 'relay') {
+        console.log('[ICE] iceConnectionState=relay，确认走TURN中继');
+        _relayDetected = true;
+        // 禁用音质选择
+        document.querySelectorAll('.br-toggle-item').forEach(el => el.classList.add('disabled'));
+        const targetBr = 16000;
+        currentBitrate = targetBr;
+        userBitrateOverride = true;
+        stopAdapt();
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: targetBr }));
+        }
+        setTimeout(() => {
+          if (ws && ws.readyState === 1)
+            ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
+        }, 1000);
+      } else {
+        // 非 relay 状态下再走 getStats 检测兜底
+        detectRelayMode();
+      }
+    } else if (state === 'failed' || state === 'disconnected') {
+      console.log('[ICE] P2P断开:', state, 'iceState:', p2pPC.iceConnectionState);
       p2pRemoteStream = null;
-      if (p2pPC) { p2pPC.close(); p2pPC = null; }
-      document.getElementById('playHint').textContent = '连接断开';
-      setStatus('error', '连接断开');
       isPlaying = false;
+      if (p2pPC) { p2pPC.close(); p2pPC = null; }
+      // 清空 p2pPC 后，sender 重发 offer 时 handleWebRTCOffer 会重新创建
+      document.getElementById('playHint').textContent = '连接断开，等待重连...';
+      setStatus('buffering', '连接断开，重连中...');
     }
   };
 
@@ -369,6 +652,11 @@ function startPlayback() {
 
   const audioEl = document.getElementById('p2pAudio');
   audioEl.srcObject = p2pRemoteStream;
+  // 绑定卡顿检测：浏览器缓冲不足时触发 waiting
+  audioEl.onwaiting = onStall;
+  audioEl.onplaying = onGood;
+  // 启动自适应码率
+  startAdapt();
   // 移动端 autoplay 限制：用 AudioContext 创建 GainNode 连接 audio 元素
   // 但 createMediaElementSource 只能调用一次，所以直接用 play() + 重试
   const doPlay = () => {
@@ -383,6 +671,22 @@ function startPlayback() {
 }
 
 function stopPlayback() {
+  stopAdapt();
+  const audioEl = document.getElementById('p2pAudio');
+  audioEl.onwaiting = null;
+  audioEl.onplaying = null;
+  // 清理中继
+  relayMode = false;
+  relayPlaying = false;
+  relayDataQueue = [];
+  if (relaySourceBuffer) {
+    try { relaySourceBuffer.abort(); } catch(_) {}
+    relaySourceBuffer = null;
+  }
+  if (relayMediaSource) {
+    try { relayMediaSource.endOfStream(); } catch(_) {}
+    relayMediaSource = null;
+  }
   if (p2pPC) { p2pPC.close(); p2pPC = null; }
   p2pRemoteStream = null;
   pendingCandidates = [];

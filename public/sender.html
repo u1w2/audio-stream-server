@@ -53,14 +53,6 @@
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-danger { background: #dc2626; color: white; }
   .btn-danger:hover { background: #b91c1c; }
-  .br-label {
-    display: inline-flex; align-items: center; justify-content: center;
-    padding: 6px 16px; border-radius: 8px; cursor: pointer;
-    font-size: 13px; font-weight: 500; transition: all 0.15s;
-    background: rgba(255,255,255,0.06); color: #999; border: 1px solid transparent;
-  }
-  .br-label:hover { background: rgba(255,255,255,0.1); color: #ccc; }
-  .br-label.selected { background: rgba(102,126,234,0.2); color: #667eea; border-color: #667eea66; }
   .hidden { display: none !important; }
   .device-item {
     display: flex; align-items: center; justify-content: space-between;
@@ -89,16 +81,6 @@
     ⚠️ <strong>浏览器安全限制：</strong>当前页面非安全上下文，无法捕获音频。<br><br>
     请改用 <strong>localhost</strong> 访问：<br>
     <a href="#" id="localhostLink"><code id="localhostUrl"></code></a>
-  </div>
-
-  <div id="bitrateSelector" class="hidden" style="margin-bottom:16px; display:flex; flex-direction:column; align-items:center; gap:6px;">
-    <label style="font-size:13px; color:#888;">音质选择</label>
-    <div style="display:flex; gap:8px;">
-      <label class="br-label" data-value="32000" onclick="selectBitrate(this)">低</label>
-      <label class="br-label" data-value="64000" onclick="selectBitrate(this)">中</label>
-      <label class="br-label selected" data-value="128000" onclick="selectBitrate(this)">高</label>
-      <label class="br-label" data-value="256000" onclick="selectBitrate(this)">极高</label>
-    </div>
   </div>
 
   <div id="stepCreate">
@@ -133,10 +115,16 @@ let isStreaming = false;
 let deviceCounter = 0;
 let deviceList = {};
 let selectedBitrate = 128000; // 默认高音质 128kbps
+// 中继相关
+let relayRecorder = null;
 
 // WebRTC
 let peerConnections = {};
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'turn:39.101.174.208:3478', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
+  { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
+];
 
 // --- Check secure context ---
 function checkSecureContext() {
@@ -155,21 +143,54 @@ function checkSecureContext() {
 }
 checkSecureContext();
 
-// --- 码率选择 ---
-function selectBitrate(el) {
-  document.querySelectorAll('.br-label').forEach(l => l.classList.remove('selected'));
-  el.classList.add('selected');
-  selectedBitrate = parseInt(el.dataset.value);
-  // 如果已有连接，实时应用码率
-  Object.entries(peerConnections).forEach(([id, pc]) => {
-    const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
-    if (sender) {
-      const params = sender.getParameters();
-      if (!params.encodings) params.encodings = [{}];
-      params.encodings[0].maxBitrate = selectedBitrate;
-      sender.setParameters(params).catch(() => {});
-    }
-  });
+// --- TURN relay 检测（sender 端）：一旦发现走中继，锁定码率 ---
+let _relayDetectedSender = false;
+function detectRelayOnPeer(pc) {
+  if (_relayDetectedSender) return;
+  const doCheck = (attempt) => {
+    if (!pc || _relayDetectedSender) return;
+    pc.getStats().then(stats => {
+      let hasRelay = false;
+      stats.forEach(report => {
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          if (report.localCandidateType === 'relay' || report.remoteCandidateType === 'relay') {
+            hasRelay = true;
+          }
+        }
+        if (report.candidateType === 'relay' || report.type === 'relay') {
+          hasRelay = true;
+        }
+        if (report.ip === '39.101.174.208' || report.address === '39.101.174.208') {
+          hasRelay = true;
+        }
+      });
+      if (hasRelay) {
+        _relayDetectedSender = true;
+        console.log('[Sender Relay] 走 TURN 中继，强制 16kbps');
+        selectedBitrate = 16000;
+        // 立即应用到所有 peer 连接
+        Object.entries(peerConnections).forEach(([id, p]) => {
+          const sender = p.getSenders().find(s => s.track && s.track.kind === 'audio');
+          if (sender) {
+            const params = sender.getParameters();
+            if (!params.encodings) params.encodings = [{}];
+            params.encodings[0].maxBitrate = 16000;
+            sender.setParameters(params).catch(() => {});
+          }
+        });
+      } else {
+        console.log('[Sender Relay] 尝试' + attempt + ': P2P直连');
+        if (attempt < 3) {
+          setTimeout(() => doCheck(attempt + 1), 2000);
+        }
+      }
+    }).catch(() => {
+      if (attempt < 3) {
+        setTimeout(() => doCheck(attempt + 1), 2000);
+      }
+    });
+  };
+  doCheck(1);
 }
 
 // --- WebSocket (signaling only) ---
@@ -223,13 +244,47 @@ async function createRoom() {
   }
 }
 
+// --- 中继推流（MediaRecorder → WebSocket → server） ---
+function startRelay(stream) {
+  if (relayRecorder) return;
+  // 用低码率 Opus 编码，通过 WebSocket 二进制推送到 server
+  const mimeType = 'audio/webm;codecs=opus';
+  if (!MediaRecorder.isTypeSupported(mimeType)) {
+    console.log('[Relay] Opus/webm not supported, skipping relay');
+    return;
+  }
+  try {
+    relayRecorder = new MediaRecorder(stream, {
+      mimeType,
+      audioBitsPerSecond: 8000, // 8kbps 省流保底
+    });
+    relayRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0 && ws && ws.readyState === 1) {
+        ws.send(e.data);
+      }
+    };
+    // 每 100ms 发一次数据，降低延迟
+    relayRecorder.start(100);
+    console.log('[Relay] Started at 8kbps');
+  } catch (err) {
+    console.log('[Relay] Failed:', err.message);
+    relayRecorder = null;
+  }
+}
+
+function stopRelay() {
+  if (relayRecorder && relayRecorder.state !== 'inactive') {
+    relayRecorder.stop();
+  }
+  relayRecorder = null;
+}
+
 function handleSignaling(msg) {
   switch (msg.type) {
     case 'created':
       roomCode = msg.code;
       document.getElementById('stepCreate').classList.add('hidden');
       document.getElementById('stepStreaming').classList.remove('hidden');
-      document.getElementById('bitrateSelector').classList.remove('hidden');
       document.getElementById('tipBox').classList.add('hidden');
       setStatus('connected', '房间已创建，等待手机扫码...');
 
@@ -250,6 +305,10 @@ function handleSignaling(msg) {
       // P2P: 建连接发音频
       if (localAudioTrack) {
         startP2P(devId);
+      }
+      // 启动中继推流（16kbps Opus WebSocket）
+      if (audioStream && !relayRecorder) {
+        startRelay(audioStream);
       }
       if (!isStreaming) {
         isStreaming = true;
@@ -317,10 +376,6 @@ function handleSignaling(msg) {
       // receiver 请求改变码率：刷新所有 peer 的编码参数
       const br = msg.bitrate;
       selectedBitrate = br;
-      // 同步 sender 端 UI
-      document.querySelectorAll('.br-label').forEach(l => l.classList.remove('selected'));
-      const match = document.querySelector(`.br-label[data-value="${br}"]`);
-      if (match) match.classList.add('selected');
       // 应用到所有连接
       Object.entries(peerConnections).forEach(([id, pc]) => {
         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
@@ -342,10 +397,11 @@ function handleSignaling(msg) {
 }
 
 // --- WebRTC P2P ---
-function startP2P(deviceId) {
-  if (peerConnections[deviceId]) return;
+let _relayRetryTimer = {}; // deviceId → timer ID
 
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+function createPC(deviceId, useTURN) {
+  const servers = useTURN ? ICE_SERVERS : [{ urls: 'stun:stun.l.google.com:19302' }];
+  const pc = new RTCPeerConnection({ iceServers: servers });
   peerConnections[deviceId] = pc;
 
   // 添加音频轨道
@@ -363,7 +419,6 @@ function startP2P(deviceId) {
       sender.setParameters(params).catch(() => {});
     }
   };
-  // 立即试一次，连接建立后再试一次确保生效
   setTimeout(applyBitrate, 100);
   setTimeout(applyBitrate, 2000);
 
@@ -376,19 +431,85 @@ function startP2P(deviceId) {
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
       updateDeviceMode(deviceId, 'p2p');
+      const iceState = pc.iceConnectionState;
+      console.log('[Sender] iceConnectionState:', iceState, 'useTURN:', useTURN);
+      if (iceState === 'relay' && useTURN) {
+        // 走了 TURN 中继 → 锁码率，启动 P2P 重试
+        console.log('[Sender] 走TURN中继，锁码率');
+        selectedBitrate = 8000;
+        applyBitrate();
+        // 通知 receiver 当前是中继模式
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 8000 }));
+        }
+        // 启动定期 P2P 重试
+        startP2PRetry(deviceId);
+      } else if (!useTURN && iceState === 'connected') {
+        // 纯 STUN 连接成功 → P2P 通了！恢复码率
+        console.log('[Sender] P2P直连成功，恢复码率');
+        _relayDetectedSender = false;
+        selectedBitrate = 128000;
+        applyBitrate();
+        // 清除重试定时器
+        clearP2PRetry(deviceId);
+        // 通知 receiver 切回 P2P
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 128000 }));
+        }
+      } else {
+        detectRelayOnPeer(pc);
+      }
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
       updateDeviceMode(deviceId, 'disconnected');
       cleanupPeerConnection(deviceId);
+      if (deviceList[deviceId] && localAudioTrack) {
+        setTimeout(() => startP2P(deviceId), 2000);
+      }
     }
   };
+
+  return pc;
+}
+
+function startP2P(deviceId) {
+  if (peerConnections[deviceId]) return;
+  // 初始用纯 STUN 尝试 P2P，2秒后如果还没连上则升级到 TURN
+  createPC(deviceId, false);
+  // 发起连接
+  const pc = peerConnections[deviceId];
+  if (!pc) return;
 
   pc.createOffer().then(offer => {
     return pc.setLocalDescription(offer);
   }).then(() => {
     if (ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, sdp: pc.localDescription.toJSON() }));
+      ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, useTURN: false, sdp: pc.localDescription.toJSON() }));
     }
-    // P2P 连接超时后清理
+    // 5秒后检查：如果还没连上，升级到 TURN
+    setTimeout(() => {
+      const p = peerConnections[deviceId];
+      if (p && p.iceConnectionState !== 'connected' && p.iceConnectionState !== 'completed') {
+        console.log('[Sender] P2P 5秒未连通，升级TURN连接');
+        cleanupPeerConnection(deviceId);
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
+        }
+        // 重建带 TURN 的连接
+        const relayPC = createPC(deviceId, true);
+        if (relayPC) {
+          relayPC.createOffer().then(offer => {
+            return relayPC.setLocalDescription(offer);
+          }).then(() => {
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, useTURN: true, sdp: relayPC.localDescription.toJSON() }));
+            }
+          }).catch(() => {
+            cleanupPeerConnection(deviceId);
+          });
+        }
+      }
+    }, 2000);
+    // 15秒后如果还在 connecting 状态则清理
     setTimeout(() => {
       if (deviceList[deviceId] && deviceList[deviceId].mode === 'connecting') {
         updateDeviceMode(deviceId, 'timeout');
@@ -397,6 +518,74 @@ function startP2P(deviceId) {
     }, 15000);
   }).catch(() => {
     cleanupPeerConnection(deviceId);
+  });
+}
+
+// 定期尝试切回 P2P（纯 STUN）
+function startP2PRetry(deviceId) {
+  clearP2PRetry(deviceId);
+  _relayRetryTimer[deviceId] = setInterval(() => {
+    console.log('[Sender] 尝试切回P2P...');
+    tryReconnectP2P(deviceId);
+  }, 30000);
+}
+
+function clearP2PRetry(deviceId) {
+  if (_relayRetryTimer[deviceId]) {
+    clearInterval(_relayRetryTimer[deviceId]);
+    delete _relayRetryTimer[deviceId];
+  }
+}
+
+function tryReconnectP2P(deviceId) {
+  if (!deviceList[deviceId] || !localAudioTrack) return;
+  if (peerConnections[deviceId]) {
+    cleanupPeerConnection(deviceId);
+  }
+  // 发信令通知 receiver 重建（纯 STUN）
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'reconnect-p2p', targetReceiverId: deviceId }));
+  }
+  // 自己重建纯 STUN 连接
+  const pc = createPC(deviceId, false);
+  if (!pc) return;
+  pc.createOffer().then(offer => {
+    return pc.setLocalDescription(offer);
+  }).then(() => {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, useTURN: false, sdp: pc.localDescription.toJSON() }));
+    }
+    // 5秒后检查是否 P2P 成功
+    setTimeout(() => {
+      const p = peerConnections[deviceId];
+      if (p && p.iceConnectionState !== 'connected' && p.iceConnectionState !== 'completed') {
+        console.log('[Sender] P2P重试失败，恢复TURN连接');
+        cleanupPeerConnection(deviceId);
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
+        }
+        // 重建带 TURN 的连接
+        const relayPC = createPC(deviceId, true);
+        if (relayPC) {
+          relayPC.createOffer().then(offer => {
+            return relayPC.setLocalDescription(offer);
+          }).then(() => {
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, useTURN: true, sdp: relayPC.localDescription.toJSON() }));
+            }
+          }).catch(() => {
+            cleanupPeerConnection(deviceId);
+          });
+        }
+      }
+    }, 5000);
+  }).catch(() => {
+    cleanupPeerConnection(deviceId);
+    // 恢复 TURN
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
+    }
+    setTimeout(() => startP2P(deviceId), 1000);
   });
 }
 
@@ -477,6 +666,7 @@ function updateConnCount() {
 }
 
 function stopStreaming() {
+  stopRelay();
   if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
   localAudioTrack = null;
   Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));

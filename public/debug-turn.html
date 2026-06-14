@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>TURN Test</title></head>
+<body>
+<h1>TURN 连接测试</h1>
+<pre id="log"></pre>
+<script>
+const log = document.getElementById('log');
+function add(t) { log.textContent += t + '\n'; }
+
+add('ICE 服务器列表:');
+const servers = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'turn:39.101.174.208:3478', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
+  { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
+];
+servers.forEach(s => add('  ' + (s.urls || s.url)));
+
+add('\n创建 PC...');
+let pc1, pc2;
+try {
+  pc1 = new RTCPeerConnection({ iceServers: servers });
+  pc2 = new RTCPeerConnection({ iceServers: servers });
+
+  // 添加一个假的数据通道来触发连接
+  pc1.createDataChannel('test');
+
+  let candidates1 = [], candidates2 = [];
+
+  pc1.onicecandidate = e => {
+    if (e.candidate) {
+      candidates1.push(e.candidate);
+      add('PC1 ICE: ' + e.candidate.type + ' ' + e.candidate.protocol + ' ' + e.candidate.address + ':' + e.candidate.port);
+    } else {
+      add('\nPC1 ICE 收集完成，共 ' + candidates1.length + ' 个候选者');
+      // 检查是否包含 relay 候选
+      const relay = candidates1.filter(c => c.type === 'relay');
+      add('其中 relay 候选: ' + (relay.length > 0 ? relay.map(c => c.address + ':' + c.port).join(', ') : '无'));
+    }
+  };
+
+  pc2.onicecandidate = e => {
+    if (e.candidate) {
+      candidates2.push(e.candidate);
+    }
+  };
+
+  pc1.oniceconnectionstatechange = () => {
+    add('\nPC1 ICE 状态: ' + pc1.iceConnectionState);
+    if (pc1.iceConnectionState === 'connected') {
+      add('✅ P2P 连接成功！');
+      const relay = candidates1.filter(c => c.type === 'relay');
+      add('使用候选: ' + (relay.length > 0 ? 'RELAY (TURN)' : 'P2P (直连)'));
+    }
+  };
+
+  pc1.createOffer().then(o => pc1.setLocalDescription(o)).then(() => {
+    add('Offer SDP type: ' + pc1.localDescription.type);
+    return pc2.setRemoteDescription(pc1.localDescription);
+  }).then(() => {
+    return pc2.createAnswer();
+  }).then(a => pc2.setLocalDescription(a)).then(() => {
+    return pc1.setRemoteDescription(pc2.localDescription);
+  }).then(() => {
+    add('\n--- SDP 交换完成，等待 ICE 连接 ---');
+  }).catch(e => add('\n❌ 错误: ' + e.message));
+
+  setTimeout(() => {
+    if (pc1.iceConnectionState !== 'connected') {
+      add('\n⏱ 15秒超时，ICE 状态: ' + pc1.iceConnectionState);
+      const relay = candidates1.filter(c => c.type === 'relay');
+      add('当前候选者: ' + candidates1.length + ' 个');
+      add('relay 候选: ' + (relay.length > 0 ? relay.map(c => c.address + ':' + c.port).join(', ') : '无'));
+    }
+  }, 15000);
+} catch(e) {
+  add('\n❌ 创建失败: ' + e.message);
+}
+</script>
+</body></html>

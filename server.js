@@ -67,8 +67,21 @@ wss.on('connection', (ws) => {
   let currentRole = null;
 
   ws.on('message', async (raw, isBinary) => {
-    // Ignore binary messages (no audio relay in P2P mode)
-    if (isBinary) return;
+    // Binary messages = audio relay data (sender → server → receivers)
+    if (isBinary) {
+      if (currentRoom && rooms[currentRoom]) {
+        const room = rooms[currentRoom];
+        if (currentRole === 'sender') {
+          // 广播给所有 receiver
+          for (const r of room.receivers) {
+            if (r.readyState === 1) {
+              try { r.send(raw); } catch(_) {}
+            }
+          }
+        }
+      }
+      return;
+    }
 
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -156,7 +169,9 @@ wss.on('connection', (ws) => {
 
       case 'webrtc-offer':
       case 'webrtc-answer':
-      case 'webrtc-ice': {
+      case 'webrtc-ice':
+      case 'reconnect-p2p':
+      case 'reconnect-relay': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
 
