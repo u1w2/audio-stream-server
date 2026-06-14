@@ -451,10 +451,12 @@ function createPC(deviceId, useTURN) {
         startP2PRetry(deviceId);
       } else if (!useTURN && iceState === 'connected') {
         // 纯 STUN 连接成功 → P2P 通了！恢复码率
-        console.log('[Sender] P2P直连成功，恢复码率');
+        console.log('[Sender] P2P直连成功，恢复码率，关闭中继保底');
         _relayDetectedSender = false;
         selectedBitrate = 128000;
         applyBitrate();
+        // P2P 通了，关闭中继保底（MediaRecorder）
+        stopRelay();
         // 清除重试定时器
         clearP2PRetry(deviceId);
         // 通知 receiver 切回 P2P
@@ -468,6 +470,11 @@ function createPC(deviceId, useTURN) {
       updateDeviceMode(deviceId, 'disconnected');
       cleanupPeerConnection(deviceId);
       if (deviceList[deviceId] && localAudioTrack) {
+        // P2P 断开，启动中继保底（如果还没启动）
+        if (!relayRecorder && audioStream) {
+          startRelay(audioStream);
+          console.log('[Relay] P2P断开，重新启动中继保底');
+        }
         setTimeout(() => startP2P(deviceId), 2000);
       }
     }
