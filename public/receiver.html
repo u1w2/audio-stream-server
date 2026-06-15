@@ -449,14 +449,19 @@ function handleSignaling(msg) {
         const p2pConnected = p2pPC && (p2pPC.connectionState === 'connected' || p2pPC.connectionState === 'completed');
         if (!p2pConnected && !isPlaying) {
           console.log('[Relay] 5秒P2P未连通，切换到中继模式');
-          // 如果有 p2pPC 但没连上，关闭它让中继走
           if (p2pPC) { p2pPC.close(); p2pPC = null; pendingCandidates = []; }
           relayMode = true;
           document.getElementById('playHint').textContent = '中继模式（低码率）';
           setStatus('playing', '中继播放 📡');
           isPlaying = true;
-          // 尝试播放已缓存的中继数据
           const audioEl = document.getElementById('p2pAudio');
+          // 如果 relaySourceBuffer 还没准备好，强制重新初始化
+          if (!relaySourceBuffer && relayDataQueue.length > 0) {
+            console.log('[Relay] SourceBuffer未就绪，重新初始化，队列长度=' + relayDataQueue.length);
+            relayMediaSource = null;
+            relayPlaying = false;
+            initRelayPlayback();
+          }
           audioEl.play().catch(() => {});
         }
       }, 5000);
@@ -501,29 +506,25 @@ function handleSignaling(msg) {
       break;
 
     case 'reconnect-relay':
-      // P2P 失败，用 TURN 重建——立即切换到中继保底播放
-      console.log('[Receiver] 收到 reconnect-relay，切中继模式保底');
+      // P2P 失败，保持中继保底播放——不改 audio pipeline
+      console.log('[Receiver] 收到 reconnect-relay，保持中继模式');
       if (p2pPC) { p2pPC.close(); p2pPC = null; }
       pendingCandidates = [];
       _relayDetected = true;
-      // 清除 P2P 音频源
+      // 只清 srcObject（如果之前 startPlayback 绑了 P2P 流）
       const relayAudioEl = document.getElementById('p2pAudio');
       relayAudioEl.onwaiting = null;
       relayAudioEl.onplaying = null;
       if (relayAudioEl.srcObject) {
         relayAudioEl.srcObject = null;
       }
-      // 仅在 MediaSource 未绑定或已结束时才重新绑定，避免中断当前播放
-      if (relayMediaSource && !relayAudioEl.src.includes('blob:')) {
-        relayAudioEl.src = URL.createObjectURL(relayMediaSource);
-      }
       // TURN 中继模式隐藏音质选择
       document.getElementById('bitrateControl').classList.add('hidden');
-      // 立即切中继模式
       relayMode = true;
       document.getElementById('playHint').textContent = '中继模式（低码率）';
       setStatus('playing', '中继播放 📡');
       isPlaying = true;
+      // 确保 audio 在播（relayMediaSource 一直绑定，不需要重新绑）
       relayAudioEl.play().catch(() => {});
       break;
 
@@ -611,13 +612,14 @@ function handleWebRTCOffer(msg) {
         if (ws && ws.readyState === 1) {
           ws.send(JSON.stringify({ type: 'connection-status', receiverId: myReceiverId, mode: 'relay' }));
         }
-        // 确保 audio 元素还在播中继 MediaSource
+        // 清除可能的 P2P srcObject，但不重新绑定 MediaSource（已在 initRelayPlayback 中绑定）
         const audioEl = document.getElementById('p2pAudio');
         if (audioEl.srcObject) {
           audioEl.srcObject = null;
-        }
-        if (relayMediaSource && relayMediaSource.readyState !== 'ended') {
-          audioEl.src = URL.createObjectURL(relayMediaSource);
+          // 只有 srcObject 被清除后才需要恢复 relayMediaSource 绑定
+          if (relayMediaSource && relayMediaSource.readyState !== 'ended' && !audioEl.src.includes('blob:')) {
+            audioEl.src = URL.createObjectURL(relayMediaSource);
+          }
         }
         audioEl.play().catch(() => {});
         // TURN 中继模式隐藏音质选择
