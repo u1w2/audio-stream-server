@@ -675,7 +675,7 @@ function startP2PRetry(deviceId) {
       ws.send(JSON.stringify({ type: 'reconnect-p2p', targetReceiverId: deviceId }));
     }
     startP2P(deviceId, true);
-  }, 30000);
+  }, 10000);
 }
 
 function clearP2PRetry(deviceId) {
