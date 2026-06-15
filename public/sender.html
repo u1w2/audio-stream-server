@@ -543,9 +543,8 @@ function createPC(deviceId, useTURN) {
           startRelay(audioStream);
           console.log('[Relay] P2P断开，重新启动中继保底');
         }
-        // 如果没有 P2P 重试正在进行，2秒后尝试重连
-        // 但如果是主动重试触发的断开，不额外重连
-        if (!wasManualRetry && !_p2pRetrying[deviceId]) {
+        // 中继模式下不重复尝试——由 startP2PRetry 的30秒周期统一管理
+        if (!wasManualRetry && !_p2pRetrying[deviceId] && !_relayDetectedSender) {
           setTimeout(() => startP2P(deviceId, true), 2000);
         }
       }
