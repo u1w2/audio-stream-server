@@ -11,6 +11,38 @@ const DEFAULT_IP = '192.168.1.151';
 const server = http.createServer((req, res) => {
   let pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
 
+  // API 端点：在线状态
+  if (pathname === '/api/status') {
+    const roomsList = Object.entries(rooms).map(([code, room]) => {
+      const senderAlive = room.sender && room.sender.readyState === 1;
+      const receiversAlive = room.receivers.filter(r => r.readyState === 1);
+      return {
+        code,
+        sender: senderAlive,
+        receivers: receiversAlive.length,
+        createdAt: room._createdAt,
+        uptime: room._createdAt ? Math.floor((Date.now() - room._createdAt) / 1000) : 0,
+      };
+    });
+    const totalRooms = roomsList.length;
+    const totalSenders = roomsList.filter(r => r.sender).length;
+    const totalReceivers = roomsList.reduce((s, r) => s + r.receivers, 0);
+
+    res.writeHead(200, {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-cache',
+    });
+    res.end(JSON.stringify({
+      rooms: totalRooms,
+      senders: totalSenders,
+      receivers: totalReceivers,
+      total: totalSenders + totalReceivers,
+      list: roomsList,
+    }));
+    return;
+  }
+
   let filePath = pathname === '/' ? '/sender.html' :
                  pathname === '/receiver' ? '/receiver.html' :
                  pathname;
@@ -91,7 +123,7 @@ wss.on('connection', (ws) => {
         let code;
         do { code = generateCode(); } while (rooms[code]);
         const maxConnections = Math.max(1, Math.min(20, parseInt(msg.maxConnections) || 5));
-        rooms[code] = { sender: ws, maxConnections, receivers: [], receiverCount: 0, _host: msg.host };
+        rooms[code] = { sender: ws, maxConnections, receivers: [], receiverCount: 0, _host: msg.host, _createdAt: Date.now() };
         currentRoom = code;
         currentRole = 'sender';
 
