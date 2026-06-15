@@ -488,6 +488,7 @@ function handleSignaling(msg) {
       if (p2pPC) { p2pPC.close(); p2pPC = null; }
       pendingCandidates = [];
       _relayDetected = false;
+      _lastOfferUseTURN = false; // 重置，后续纯 STUN offer 不会被误判为 TURN
       // 不设 isPlaying = false——中继仍在播，不中断播放
       // 不更新 UI——保持中继模式显示，只有 P2P 真正成功才切换
       // 6秒超时保护：如果 P2P 没真正接通，保持中继不变
@@ -559,7 +560,10 @@ function handleWebRTCOffer(msg) {
     console.log('[Receiver] 收到新offer，替换旧连接');
     p2pPC.close();
     p2pPC = null;
-    isPlaying = false;
+    // 中继模式下不重置 isPlaying，保持中继播放
+    if (!relayMode) {
+      isPlaying = false;
+    }
     // 不重置 relayMode——切换新连接时保持中继保底，等 P2P 实际连通再关
     relayPlaying = false;
   }
