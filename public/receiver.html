@@ -484,29 +484,17 @@ function handleSignaling(msg) {
 
     case 'reconnect-p2p':
       // sender 想切回 P2P，重置 PC 等新 offer
-      console.log('[Receiver] 收到 reconnect-p2p，重建纯STUN连接');
+      console.log('[Receiver] 收到 reconnect-p2p，重建纯STUN连接，保持中继播放');
       if (p2pPC) { p2pPC.close(); p2pPC = null; }
       pendingCandidates = [];
       _relayDetected = false;
-      isPlaying = false; // 重置播放状态，让 startPlayback 能执行
-      // 隐藏中继状态，等待新连接
-      document.getElementById('playHint').textContent = '切换P2P连接...';
-      // 6秒超时保护：如果 P2P 没真正接通（无音频数据），切回中继
+      // 不设 isPlaying = false——中继仍在播，不中断播放
+      // 不更新 UI——保持中继模式显示，只有 P2P 真正成功才切换
+      // 6秒超时保护：如果 P2P 没真正接通，保持中继不变
       if (window._p2pTimeout) clearTimeout(window._p2pTimeout);
       window._p2pTimeout = setTimeout(() => {
         if (!isPlaying && relayMediaSource) {
-          console.log('[Receiver] P2P超时未接通，切回中继');
-          relayMode = true;
-          document.getElementById('playHint').textContent = '中继模式（低码率）';
-          setStatus('playing', '中继播放 📡');
-          isPlaying = true;
-          document.getElementById('p2pAudio').play().catch(() => {});
-          // 恢复中继 MediaSource
-          const audioEl = document.getElementById('p2pAudio');
-          if (audioEl.srcObject) audioEl.srcObject = null;
-          if (relayMediaSource && relayMediaSource.readyState !== 'ended') {
-            audioEl.src = URL.createObjectURL(relayMediaSource);
-          }
+          console.log('[Receiver] P2P超时未接通，保持中继');
         }
       }, 6000);
       break;
