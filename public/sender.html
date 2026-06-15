@@ -311,21 +311,10 @@ function handleSignaling(msg) {
       document.getElementById('tipBox').classList.add('hidden');
       setStatus('connected', '房间已创建，等待手机扫码...');
 
-      // 启动全局 P2P 重试引擎：仅当没有任何设备建立连接时尝试 P2P
+      // 不再需要全局 P2P 重试引擎——TURN 模式下由 startP2PRetry 每30秒自动尝试
       _globalP2PActive = false;
-      if (_globalP2PRetryTimer) clearInterval(_globalP2PRetryTimer);
-      _globalP2PRetryTimer = setInterval(() => {
-        if (_globalP2PActive) return; // 已经是 P2P 模式，跳过
-        if (!_relayDetectedSender) return; // 不是中继模式，跳过
-        logToServer('全局P2P重试: relay=' + _relayDetectedSender + ' devices=' + Object.keys(deviceList).length);
-        // 对处于中继模式的设备，逐个尝试 P2P
-        Object.keys(deviceList).forEach(devId => {
-          const d = deviceList[devId];
-          if (d && d.mode === 'p2p') return;
-          // 中继模式的设备，清理 TURN PC 并尝试纯 STUN 重连
-          tryReconnectP2P(devId);
-        });
-      }, 15000);
+      // 清理所有残留的重试定时器
+      Object.keys(_relayRetryTimer).forEach(did => clearP2PRetry(did));
 
       if (msg.qrDataUrl) {
         document.getElementById('qrContainer').innerHTML =
@@ -486,7 +475,7 @@ function createPC(deviceId, useTURN) {
         _relayDetectedSender = true;
         selectedBitrate = 16000;
         applyBitrate();
-        tryReconnectP2P(deviceId);
+        startP2PRetry(deviceId);
         // 清除 P2P 稳定计时（如果之前有的话）
         if (p2pStableTimers[deviceId]) {
           clearTimeout(p2pStableTimers[deviceId]);
@@ -499,7 +488,7 @@ function createPC(deviceId, useTURN) {
         _relayDetectedSender = true;
         selectedBitrate = 16000;
         applyBitrate();
-        tryReconnectP2P(deviceId);
+        startP2PRetry(deviceId);
         if (p2pStableTimers[deviceId]) {
           clearTimeout(p2pStableTimers[deviceId]);
           delete p2pStableTimers[deviceId];
@@ -523,6 +512,7 @@ function createPC(deviceId, useTURN) {
             logToServer('P2P已稳定15秒，关闭中继保底，标记P2P模式');
             _globalP2PActive = true;
             stopRelay();
+            clearP2PRetry(deviceId);
             // 通知 receiver 切回 P2P
             if (ws && ws.readyState === 1) {
               ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 750000 }));
@@ -541,6 +531,7 @@ function createPC(deviceId, useTURN) {
       updateDeviceMode(deviceId, 'disconnected');
       cleanupPeerConnection(deviceId);
       _globalP2PActive = false;
+      clearP2PRetry(deviceId);
       // 清除 P2P 稳定计时器
       if (p2pStableTimers[deviceId]) {
         clearTimeout(p2pStableTimers[deviceId]);
@@ -667,6 +658,31 @@ function tryReconnectP2P(deviceId) {
   });
   // 8秒后释放重试锁，允许下次重试
   setTimeout(() => { delete _p2pRetrying[deviceId]; }, 8000);
+}
+
+// 中继模式下每30秒尝试切回 P2P
+let _relayRetryTimer = {};
+
+function startP2PRetry(deviceId) {
+  clearP2PRetry(deviceId);
+  _relayRetryTimer[deviceId] = setInterval(() => {
+    logToServer('startP2PRetry: 尝试切回P2P deviceId=' + deviceId);
+    // 清理当前的 TURN PC，通知 receiver 准备切换
+    if (peerConnections[deviceId]) {
+      cleanupPeerConnection(deviceId);
+    }
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'reconnect-p2p', targetReceiverId: deviceId }));
+    }
+    startP2P(deviceId, true);
+  }, 30000);
+}
+
+function clearP2PRetry(deviceId) {
+  if (_relayRetryTimer[deviceId]) {
+    clearInterval(_relayRetryTimer[deviceId]);
+    delete _relayRetryTimer[deviceId];
+  }
 }
 
 function updateDeviceMode(deviceId, mode) {
