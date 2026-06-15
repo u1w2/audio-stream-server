@@ -531,7 +531,6 @@ function createPC(deviceId, useTURN) {
       updateDeviceMode(deviceId, 'disconnected');
       cleanupPeerConnection(deviceId);
       _globalP2PActive = false;
-      clearP2PRetry(deviceId);
       // 清除 P2P 稳定计时器
       if (p2pStableTimers[deviceId]) {
         clearTimeout(p2pStableTimers[deviceId]);
@@ -667,7 +666,7 @@ function startP2PRetry(deviceId) {
   clearP2PRetry(deviceId);
   _relayRetryTimer[deviceId] = setInterval(() => {
     logToServer('startP2PRetry: 尝试切回P2P deviceId=' + deviceId);
-    // 清理当前的 TURN PC，通知 receiver 准备切换
+    // 清理当前 PC 并发纯 STUN 探测，保持中继推流独立不受影响
     if (peerConnections[deviceId]) {
       cleanupPeerConnection(deviceId);
     }
