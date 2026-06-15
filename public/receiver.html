@@ -505,16 +505,16 @@ function handleSignaling(msg) {
       console.log('[Receiver] 收到 reconnect-relay，切中继模式保底');
       if (p2pPC) { p2pPC.close(); p2pPC = null; }
       pendingCandidates = [];
-      // 清除 P2P 音频源，重新连接到中继 MediaSource
+      _relayDetected = true;
+      // 清除 P2P 音频源
       const relayAudioEl = document.getElementById('p2pAudio');
-      // 解绑之前 startPlayback 绑的事件
       relayAudioEl.onwaiting = null;
       relayAudioEl.onplaying = null;
       if (relayAudioEl.srcObject) {
         relayAudioEl.srcObject = null;
       }
-      // 恢复中继 MediaSource 连接（startPlayback 设 srcObject 后 audio 不听 MediaSource 了）
-      if (relayMediaSource && relayMediaSource.readyState !== 'ended') {
+      // 仅在 MediaSource 未绑定或已结束时才重新绑定，避免中断当前播放
+      if (relayMediaSource && !relayAudioEl.src.includes('blob:')) {
         relayAudioEl.src = URL.createObjectURL(relayMediaSource);
       }
       // TURN 中继模式隐藏音质选择

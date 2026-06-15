@@ -529,6 +529,7 @@ function createPC(deviceId, useTURN) {
       }
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
       updateDeviceMode(deviceId, 'disconnected');
+      const wasManualRetry = pc._manualRetry;
       cleanupPeerConnection(deviceId);
       _globalP2PActive = false;
       // 清除 P2P 稳定计时器
@@ -543,7 +544,8 @@ function createPC(deviceId, useTURN) {
           console.log('[Relay] P2P断开，重新启动中继保底');
         }
         // 如果没有 P2P 重试正在进行，2秒后尝试重连
-        if (!_p2pRetrying[deviceId]) {
+        // 但如果是主动重试触发的断开，不额外重连
+        if (!wasManualRetry && !_p2pRetrying[deviceId]) {
           setTimeout(() => startP2P(deviceId, true), 2000);
         }
       }
@@ -572,9 +574,9 @@ function startP2P(deviceId, fromRetry) {
       const p = peerConnections[deviceId];
       if (p && p.iceConnectionState !== 'connected' && p.iceConnectionState !== 'completed') {
         if (fromRetry) {
-          // 重试场景：P2P不通，通知 receiver 切回中继，保持现有中继
+          // 重试场景：P2P不通，通知 receiver 切回中继，不清 PC 以避免 disconnect 循环
           logToServer('P2P重试未连通，发reconnect-relay deviceId=' + deviceId);
-          cleanupPeerConnection(deviceId);
+          // 不清理 PC，也不 return——让 receiver 保持中继，当前 PC 自然终了
           if (ws && ws.readyState === 1) {
             ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
           }
