@@ -129,51 +129,51 @@ const ICE_SERVERS = [
 let pendingCode = null;
 
 // 中继播放相关
-let relayMediaSource = null;
-let relaySourceBuffer = null;
-let relayPlaying = false;
-let relayDataQueue = [];
-let relayMode = false; // true = 使用中继音频, false = 使用P2P
+let relayDataChunks = [];    // 累积的中继数据（ArrayBuffer）
+let relayBlobTimer = null;   // 定时器
+let relayBlobPlaying = false;
+let relayMode = false;
 
 function initRelayPlayback() {
-  if (relayMediaSource || relayPlaying) return;
-  try {
-    relayMediaSource = new MediaSource();
-    relayMediaSource.addEventListener('sourceopen', () => {
-      console.log('[Relay] MediaSource sourceopen fired');
-      const sb = relayMediaSource.addSourceBuffer('audio/webm;codecs=opus');
-      relaySourceBuffer = sb;
-      sb.mode = 'sequence';
-      while (relayDataQueue.length > 0) {
-        const chunk = relayDataQueue.shift();
-        try { sb.appendBuffer(chunk); } catch(_) {}
-      }
-    });
-    const audioEl = document.getElementById('p2pAudio');
-    audioEl.src = URL.createObjectURL(relayMediaSource);
-    // 强制触发加载——移动端可能不会自动 open MediaSource
-    audioEl.load();
-    console.log('[Relay] MediaSource initialized, waiting for sourceopen');
-  } catch (err) {
-    console.log('[Relay] Init failed:', err.message);
+  // 不需要初始化——Blob 播放不需要 MediaSource
+  console.log('[Relay] Blob播放模式');
+}
+
+function appendRelayData(buf) {
+  relayDataChunks.push(buf);
+  if (!relayBlobPlaying) {
+    playRelayChunk();
   }
 }
 
-function appendRelayData(data) {
-  if (relaySourceBuffer && !relaySourceBuffer.updating) {
-    try {
-      relaySourceBuffer.appendBuffer(data);
-    } catch(_) {
-      relayDataQueue.push(data);
+function playRelayChunk() {
+  if (relayDataChunks.length === 0) {
+    relayBlobPlaying = false;
+    return;
+  }
+  relayBlobPlaying = true;
+  const chunks = relayDataChunks.splice(0);
+  const blob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
+  const url = URL.createObjectURL(blob);
+  const audioEl = document.getElementById('p2pAudio');
+  // 释放旧 URL
+  if (audioEl._relayBlobUrl) URL.revokeObjectURL(audioEl._relayBlobUrl);
+  audioEl._relayBlobUrl = url;
+  audioEl.src = url;
+  audioEl.play().catch(() => {});
+  // 当前段播完后自动切到下一段（用 timeupdate 检测即将结束）
+  audioEl.onended = () => {
+    playRelayChunk();
+  };
+  // 2 秒兜底：如果还没播完就切（避免过大延迟）
+  clearTimeout(relayBlobTimer);
+  relayBlobTimer = setTimeout(() => {
+    if (audioEl.paused) return;
+    const remaining = audioEl.duration - audioEl.currentTime;
+    if (remaining < 0.5 && relayDataChunks.length > 0) {
+      playRelayChunk();
     }
-  } else {
-    relayDataQueue.push(data);
-  }
-  if (!relayPlaying) {
-    relayPlaying = true;
-    const audioEl = document.getElementById('p2pAudio');
-    audioEl.play().catch(() => {});
-  }
+  }, 2000);
 }
 
 // --- Initialize UI based on URL params ---
@@ -477,12 +477,9 @@ function handleSignaling(msg) {
           setStatus('playing', '中继播放 📡');
           isPlaying = true;
           const audioEl = document.getElementById('p2pAudio');
-          // 如果 relaySourceBuffer 还没准备好，强制重新初始化
-          if (!relaySourceBuffer && relayDataQueue.length > 0) {
-            console.log('[Relay] SourceBuffer未就绪，重新初始化，队列长度=' + relayDataQueue.length);
-            relayMediaSource = null;
-            relayPlaying = false;
-            initRelayPlayback();
+          // 如果有累积的中继数据，触发播放
+          if (relayDataChunks.length > 0 && !relayBlobPlaying) {
+            playRelayChunk();
           }
           audioEl.play().catch(() => {});
         }
@@ -521,7 +518,7 @@ function handleSignaling(msg) {
       // 6秒超时保护：如果 P2P 没真正接通，保持中继不变
       if (window._p2pTimeout) clearTimeout(window._p2pTimeout);
       window._p2pTimeout = setTimeout(() => {
-        if (!isPlaying && relayMediaSource) {
+        if (!isPlaying && relayDataChunks.length > 0) {
           console.log('[Receiver] P2P超时未接通，保持中继');
         }
       }, 6000);
@@ -546,7 +543,7 @@ function handleSignaling(msg) {
       document.getElementById('playHint').textContent = '中继模式（低码率）';
       setStatus('playing', '中继播放 📡');
       isPlaying = true;
-      // 确保 audio 在播（relayMediaSource 一直绑定，不需要重新绑）
+      // 确保 audio 在播（blob 自动触发，不需要额外操作）
       relayAudioEl.play().catch(() => {});
       break;
 
@@ -588,7 +585,7 @@ function handleWebRTCOffer(msg) {
       isPlaying = false;
     }
     // 不重置 relayMode——切换新连接时保持中继保底，等 P2P 实际连通再关
-    relayPlaying = false;
+    relayBlobPlaying = false;
   }
 
   // 根据 offer 中的 useTURN 标记决定 ICE 配置
@@ -634,14 +631,14 @@ function handleWebRTCOffer(msg) {
         if (ws && ws.readyState === 1) {
           ws.send(JSON.stringify({ type: 'connection-status', receiverId: myReceiverId, mode: 'relay' }));
         }
-        // 清除可能的 P2P srcObject，但不重新绑定 MediaSource（已在 initRelayPlayback 中绑定）
+        // 清除可能的 P2P srcObject，恢复中继 blob 播放
         const audioEl = document.getElementById('p2pAudio');
         if (audioEl.srcObject) {
           audioEl.srcObject = null;
-          // 只有 srcObject 被清除后才需要恢复 relayMediaSource 绑定
-          if (relayMediaSource && relayMediaSource.readyState !== 'ended' && !audioEl.src.includes('blob:')) {
-            audioEl.src = URL.createObjectURL(relayMediaSource);
-          }
+        }
+        // 如果有累积中继数据且未播放，触发播放
+        if (relayDataChunks.length > 0 && !relayBlobPlaying) {
+          playRelayChunk();
         }
         audioEl.play().catch(() => {});
         // TURN 中继模式隐藏音质选择
@@ -730,15 +727,12 @@ function stopPlayback() {
   const audioEl = document.getElementById('p2pAudio');
   // 清理中继
   relayMode = false;
-  relayPlaying = false;
-  relayDataQueue = [];
-  if (relaySourceBuffer) {
-    try { relaySourceBuffer.abort(); } catch(_) {}
-    relaySourceBuffer = null;
-  }
-  if (relayMediaSource) {
-    try { relayMediaSource.endOfStream(); } catch(_) {}
-    relayMediaSource = null;
+  relayBlobPlaying = false;
+  relayDataChunks = [];
+  clearTimeout(relayBlobTimer);
+  if (audioEl._relayBlobUrl) {
+    URL.revokeObjectURL(audioEl._relayBlobUrl);
+    audioEl._relayBlobUrl = null;
   }
   if (p2pPC) { p2pPC.close(); p2pPC = null; }
   p2pRemoteStream = null;
