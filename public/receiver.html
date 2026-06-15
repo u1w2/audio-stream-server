@@ -423,9 +423,13 @@ function connectWS() {
     ws.onmessage = (e) => {
       // 二进制数据 = 中继音频
       if (e.data instanceof ArrayBuffer || e.data instanceof Blob) {
-        const data = e.data instanceof Blob ? e.data : new Blob([e.data]);
-        if (relayMediaSource || relayDataQueue.length > 0) {
-          data.arrayBuffer().then(buf => appendRelayData(buf));
+        window._relayPktCount = (window._relayPktCount || 0) + 1;
+        document.getElementById('playHint').textContent = '中继数据: ' + window._relayPktCount + ' 包';
+        const buf = e.data instanceof ArrayBuffer ? e.data : null;
+        if (buf) {
+          appendRelayData(buf);
+        } else {
+          e.data.arrayBuffer().then(b => appendRelayData(b));
         }
         return;
       }
