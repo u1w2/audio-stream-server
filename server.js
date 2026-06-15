@@ -199,6 +199,10 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'sender-log': {
+        console.log(`[SenderLog] ${ws._role || '?'} ${msg.text}`);
+        break;
+      }
       case 'webrtc-offer':
       case 'webrtc-answer':
       case 'webrtc-ice':

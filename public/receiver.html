@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>音频播放</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -488,6 +491,24 @@ function handleSignaling(msg) {
       isPlaying = false; // 重置播放状态，让 startPlayback 能执行
       // 隐藏中继状态，等待新连接
       document.getElementById('playHint').textContent = '切换P2P连接...';
+      // 6秒超时保护：如果 P2P 没真正接通（无音频数据），切回中继
+      if (window._p2pTimeout) clearTimeout(window._p2pTimeout);
+      window._p2pTimeout = setTimeout(() => {
+        if (!isPlaying && relayMediaSource) {
+          console.log('[Receiver] P2P超时未接通，切回中继');
+          relayMode = true;
+          document.getElementById('playHint').textContent = '中继模式（低码率）';
+          setStatus('playing', '中继播放 📡');
+          isPlaying = true;
+          document.getElementById('p2pAudio').play().catch(() => {});
+          // 恢复中继 MediaSource
+          const audioEl = document.getElementById('p2pAudio');
+          if (audioEl.srcObject) audioEl.srcObject = null;
+          if (relayMediaSource && relayMediaSource.readyState !== 'ended') {
+            audioEl.src = URL.createObjectURL(relayMediaSource);
+          }
+        }
+      }, 6000);
       break;
 
     case 'reconnect-relay':
@@ -565,6 +586,9 @@ function handleWebRTCOffer(msg) {
     // TURN 模式下走中继播放，不处理 P2P 音频 track
     if (_relayDetected) return;
     p2pRemoteStream = e.streams[0];
+    // 强行停止中继，切到 P2P
+    relayMode = false;
+    isPlaying = false;
     startPlayback();
   };
 
@@ -665,6 +689,8 @@ function startPlayback() {
 
   // P2P 实际连通，关闭中继保底
   relayMode = false;
+  // 清除 P2P 超时保护
+  if (window._p2pTimeout) { clearTimeout(window._p2pTimeout); window._p2pTimeout = null; }
 
   // P2P 模式显示音质选择
   document.getElementById('bitrateControl').classList.remove('hidden');
