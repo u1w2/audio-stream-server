@@ -599,7 +599,7 @@ function handleWebRTCOffer(msg) {
   }
 
   // 根据 offer 中的 useTURN 标记决定 ICE 配置
-  const servers = msg.useTURN ? ICE_SERVERS : [{ urls: 'stun:stun.l.google.com:19302' }];
+  const servers = msg.useTURN ? ICE_SERVERS : [{ urls: 'stun:stun.qq.com:3478' }, { urls: 'stun:stun.aliyun.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }];
   console.log('[Receiver] 创建连接, useTURN:', !!msg.useTURN);
   p2pPC = new RTCPeerConnection({ iceServers: servers });
 
