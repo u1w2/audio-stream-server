@@ -237,6 +237,12 @@ async function activatePlayback(ctx) {
   btn.disabled = true;
   btn.textContent = '连接中...';
 
+  // 在用户手势中初始化 MediaSource——iOS Safari 要求 sourceopen 在用户手势中触发
+  initRelayPlayback();
+  const audioEl = document.getElementById('p2pAudio');
+  audioEl.play().catch(() => {});
+  audioEl.pause();
+
   try {
     document.getElementById('actionArea').classList.add('hidden');
     document.getElementById('playArea').classList.remove('hidden');
@@ -264,6 +270,12 @@ async function manualJoin() {
 
   btn.disabled = true;
   btn.textContent = '连接中...';
+
+  // 在用户手势中初始化 MediaSource
+  initRelayPlayback();
+  const audioEl = document.getElementById('p2pAudio');
+  audioEl.play().catch(() => {});
+  audioEl.pause();
 
   try {
     await connectWS();
