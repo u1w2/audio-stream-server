@@ -139,18 +139,21 @@ function initRelayPlayback() {
   if (relayMediaSource || relayPlaying) return;
   try {
     relayMediaSource = new MediaSource();
-    relayMediaSource.onsourceopen = () => {
+    relayMediaSource.addEventListener('sourceopen', () => {
+      console.log('[Relay] MediaSource sourceopen fired');
       const sb = relayMediaSource.addSourceBuffer('audio/webm;codecs=opus');
       relaySourceBuffer = sb;
       sb.mode = 'sequence';
-      // 消费队列中的数据
       while (relayDataQueue.length > 0) {
         const chunk = relayDataQueue.shift();
         try { sb.appendBuffer(chunk); } catch(_) {}
       }
-    };
+    });
     const audioEl = document.getElementById('p2pAudio');
     audioEl.src = URL.createObjectURL(relayMediaSource);
+    // 强制触发加载——移动端可能不会自动 open MediaSource
+    audioEl.load();
+    console.log('[Relay] MediaSource initialized, waiting for sourceopen');
   } catch (err) {
     console.log('[Relay] Init failed:', err.message);
   }
@@ -197,6 +200,9 @@ window.addEventListener('DOMContentLoaded', () => {
       // 预激活音频上下文，绕过移动端自动播放限制
       const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
       if (tempCtx.state === 'suspended') tempCtx.resume();
+      // 同时预激活 audio 元素——移动端要求 play 必须在用户手势中调用
+      const audioEl = document.getElementById('p2pAudio');
+      audioEl.play().then(() => audioEl.pause()).catch(() => {});
       activatePlayback(tempCtx);
     });
   } else {
