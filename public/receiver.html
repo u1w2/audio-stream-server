@@ -115,6 +115,8 @@ let p2pRemoteStream = null;
 let p2pAudioEl = null;
 let pendingCandidates = []; // 缓存 p2pPC 创建前到达的 ICE candidate
 const ICE_SERVERS = [
+  { urls: 'stun:stun.qq.com:3478' },
+  { urls: 'stun:stun.aliyun.com:3478' },
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'turn:39.101.174.208:3478', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
   { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
@@ -266,9 +268,9 @@ async function manualJoin() {
 }
 
 // --- 码率控制（点击式阶梯） ---
-const BR_LEVELS = [750000, 256000, 128000, 64000, 32000, 16000, 8000];
-const BR_TAGS = ['无损', '高', '中', '低', '极低', '省流', '超省流'];
-const BR_SHORT = ['750K', '256K', '128K', '64K', '32K', '16K', '8K'];
+const BR_LEVELS = [750000, 256000, 128000, 64000, 32000, 16000];
+const BR_TAGS = ['无损', '高', '中', '低', '极低', '省流'];
+const BR_SHORT = ['750K', '256K', '128K', '64K', '32K', '16K'];
 let currentBitrate = 128000;
 let currentBrIndex = 2; // 默认128k
 let userBitrateOverride = false;
@@ -534,10 +536,28 @@ function handleSignaling(msg) {
       break;
 
     case 'reconnect-relay':
-      // P2P 失败，用 TURN 重建
-      console.log('[Receiver] 收到 reconnect-relay，重建TURN连接');
+      // P2P 失败，用 TURN 重建——立即切换到中继保底播放
+      console.log('[Receiver] 收到 reconnect-relay，切中继模式保底');
       if (p2pPC) { p2pPC.close(); p2pPC = null; }
       pendingCandidates = [];
+      // 清除 P2P 音频源，重新连接到中继 MediaSource
+      const relayAudioEl = document.getElementById('p2pAudio');
+      // 解绑之前 startPlayback 绑的事件
+      relayAudioEl.onwaiting = null;
+      relayAudioEl.onplaying = null;
+      if (relayAudioEl.srcObject) {
+        relayAudioEl.srcObject = null;
+      }
+      // 恢复中继 MediaSource 连接（startPlayback 设 srcObject 后 audio 不听 MediaSource 了）
+      if (relayMediaSource && relayMediaSource.readyState !== 'ended') {
+        relayAudioEl.src = URL.createObjectURL(relayMediaSource);
+      }
+      // 立即切中继模式
+      relayMode = true;
+      document.getElementById('playHint').textContent = '中继模式（低码率）';
+      setStatus('playing', '中继播放 📡');
+      isPlaying = true;
+      relayAudioEl.play().catch(() => {});
       break;
 
     case 'webrtc-offer':
@@ -574,7 +594,7 @@ function handleWebRTCOffer(msg) {
     p2pPC.close();
     p2pPC = null;
     isPlaying = false;
-    relayMode = false;
+    // 不重置 relayMode——切换新连接时保持中继保底，等 P2P 实际连通再关
     relayPlaying = false;
   }
 
@@ -584,6 +604,8 @@ function handleWebRTCOffer(msg) {
   p2pPC = new RTCPeerConnection({ iceServers: servers });
 
   p2pPC.ontrack = (e) => {
+    // TURN 模式下走中继播放，不处理 P2P 音频 track
+    if (_relayDetected) return;
     p2pRemoteStream = e.streams[0];
     startPlayback();
   };
@@ -605,7 +627,9 @@ function handleWebRTCOffer(msg) {
       if (iceState === 'relay') {
         console.log('[ICE] iceConnectionState=relay，确认走TURN中继');
         _relayDetected = true;
-        // 中继流固定16kbps，按钮仍然可调（调的是P2P Opus编码器）
+        // 走 TURN 时全靠中继流播放，P2P 音频 track 不用
+        // 不设 srcObject，保持中继 MediaSource 播放
+        // 但同步 UI 状态
         const targetBr = 16000;
         currentBitrate = targetBr;
         userBitrateOverride = true;
@@ -613,11 +637,22 @@ function handleWebRTCOffer(msg) {
         if (ws && ws.readyState === 1) {
           ws.send(JSON.stringify({ type: 'connection-status', receiverId: myReceiverId, mode: 'relay' }));
         }
+        // 确保 audio 元素还在播中继 MediaSource
+        const audioEl = document.getElementById('p2pAudio');
+        if (audioEl.srcObject) {
+          audioEl.srcObject = null;
+        }
+        if (relayMediaSource && relayMediaSource.readyState !== 'ended') {
+          audioEl.src = URL.createObjectURL(relayMediaSource);
+        }
+        audioEl.play().catch(() => {});
       } else {
         // 非 relay 状态下再走 getStats 检测兜底
         detectRelayMode();
       }
     } else if (state === 'failed' || state === 'disconnected') {
+      // TURN 模式下中继还在播，忽略 P2P 连接断开
+      if (_relayDetected) return;
       console.log('[ICE] P2P断开:', state, 'iceState:', p2pPC.iceConnectionState);
       p2pRemoteStream = null;
       isPlaying = false;
@@ -662,6 +697,9 @@ function startPlayback() {
   if (audioCtx && audioCtx.state === 'suspended') {
     audioCtx.resume();
   }
+
+  // P2P 实际连通，关闭中继保底
+  relayMode = false;
 
   const audioEl = document.getElementById('p2pAudio');
   audioEl.srcObject = p2pRemoteStream;

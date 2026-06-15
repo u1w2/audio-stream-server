@@ -206,6 +206,7 @@ wss.on('connection', (ws) => {
       case 'reconnect-relay': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
+        console.log(`[Signal] ${msg.type} from ${currentRole} room=${currentRoom} targetId=${msg.targetReceiverId||''} recvId=${msg.receiverId||''}`);
 
         if (msg.targetReceiverId && room.receivers) {
           const target = room.receivers.find(r => r._receiverId === msg.targetReceiverId);

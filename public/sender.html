@@ -117,10 +117,14 @@ let deviceList = {};
 let selectedBitrate = 128000; // 默认高音质 128kbps
 // 中继相关
 let relayRecorder = null;
+// P2P稳定计时：P2P连接成功后等30秒才关中继
+let p2pStableTimers = {}; // deviceId → setTimeout ID
 
 // WebRTC
 let peerConnections = {};
 const ICE_SERVERS = [
+  { urls: 'stun:stun.qq.com:3478' },
+  { urls: 'stun:stun.aliyun.com:3478' },
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'turn:39.101.174.208:3478', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
   { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
@@ -449,26 +453,48 @@ function createPC(deviceId, useTURN) {
         selectedBitrate = 16000;
         applyBitrate();
         startP2PRetry(deviceId);
+        // 清除 P2P 稳定计时（如果之前有的话）
+        if (p2pStableTimers[deviceId]) {
+          clearTimeout(p2pStableTimers[deviceId]);
+          delete p2pStableTimers[deviceId];
+        }
       } else if (!useTURN && iceState === 'connected') {
-        // 纯 STUN 连接成功 → P2P 通了！恢复码率
-        console.log('[Sender] P2P直连成功，恢复码率，关闭中继保底');
+        // 纯 STUN 连接成功 → P2P 通了！恢复码率，5秒稳定后关中继
+        console.log('[Sender] P2P直连成功，恢复码率，等待5秒稳定后关中继');
         _relayDetectedSender = false;
         selectedBitrate = 128000;
         applyBitrate();
-        // P2P 通了，关闭中继保底（MediaRecorder）
-        stopRelay();
-        // 清除重试定时器
-        clearP2PRetry(deviceId);
-        // 通知 receiver 切回 P2P
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 128000 }));
+        // 清除之前的定时器
+        if (p2pStableTimers[deviceId]) {
+          clearTimeout(p2pStableTimers[deviceId]);
+          delete p2pStableTimers[deviceId];
         }
+        // 5秒后如果连接仍稳定，关闭中继保底
+        p2pStableTimers[deviceId] = setTimeout(() => {
+          const p = peerConnections[deviceId];
+          if (p && (p.connectionState === 'connected' || p.connectionState === 'completed')) {
+            console.log('[Sender] P2P已稳定5秒，关闭中继保底');
+            stopRelay();
+            // 清除重试定时器
+            clearP2PRetry(deviceId);
+            // 通知 receiver 切回 P2P
+            if (ws && ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 128000 }));
+            }
+          }
+          delete p2pStableTimers[deviceId];
+        }, 5000);
       } else {
         detectRelayOnPeer(pc);
       }
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
       updateDeviceMode(deviceId, 'disconnected');
       cleanupPeerConnection(deviceId);
+      // 清除 P2P 稳定计时器
+      if (p2pStableTimers[deviceId]) {
+        clearTimeout(p2pStableTimers[deviceId]);
+        delete p2pStableTimers[deviceId];
+      }
       if (deviceList[deviceId] && localAudioTrack) {
         // P2P 断开，启动中继保底（如果还没启动）
         if (!relayRecorder && audioStream) {
@@ -497,11 +523,11 @@ function startP2P(deviceId) {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, useTURN: false, sdp: pc.localDescription.toJSON() }));
     }
-    // 5秒后检查：如果还没连上，升级到 TURN
+    // 3秒后检查：如果还没连上，升级到 TURN
     setTimeout(() => {
       const p = peerConnections[deviceId];
       if (p && p.iceConnectionState !== 'connected' && p.iceConnectionState !== 'completed') {
-        console.log('[Sender] P2P 5秒未连通，升级TURN连接');
+        console.log('[Sender] P2P 3秒未连通，升级TURN连接');
         cleanupPeerConnection(deviceId);
         if (ws && ws.readyState === 1) {
           ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
@@ -520,7 +546,7 @@ function startP2P(deviceId) {
           });
         }
       }
-    }, 2000);
+    }, 3000);
     // 15秒后如果还在 connecting 状态则清理
     setTimeout(() => {
       if (deviceList[deviceId] && deviceList[deviceId].mode === 'connecting') {
