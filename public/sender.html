@@ -188,7 +188,9 @@ let _turnTransitionUntil = {};
 let _turnRecreateBackoff = {};
 let _turnRelayUnavailable = false;
 let _networkChangeDebounce = {};
+let _networkTransitionUntil = {};
 let postAnswerConnectWatchdog = {};
+let _postAnswerExtendCount = {};
 
 async function logTurnIceStats(deviceId, pc, label) {
   try {
@@ -227,8 +229,17 @@ function abortTurnModeAndRestartP2P(deviceId, reason) {
   if (mainPc) cleanupPeerConnection(deviceId, true);
   _p2pRestartCount[deviceId] = 0;
   _iceRestartCount[deviceId] = 0;
-  notifyReceiverMode(deviceId, 'p2p', selectedBitrate);
+  markNetworkTransition(deviceId, 30000);
   restartP2P(deviceId);
+}
+
+function isNetworkTransition(deviceId) {
+  return (_networkTransitionUntil[deviceId] || 0) > Date.now();
+}
+
+function markNetworkTransition(deviceId, ms) {
+  _networkTransitionUntil[deviceId] = Date.now() + (ms || 30000);
+  delete _postAnswerExtendCount[deviceId];
 }
 
 function failTurnNegotiation(deviceId, pc, label) {
@@ -327,6 +338,7 @@ function bindIceHandlers(deviceId, pc, useTURN) {
       clearConnectWatchdog(deviceId);
       clearIceRestartAnswerTimeout(deviceId);
       clearPostAnswerConnectWatchdog(deviceId);
+      delete _postAnswerExtendCount[deviceId];
       clearP2PFailoverTimer(deviceId);
       clearP2pMediaVerifyTimer(deviceId);
       if (useTURN) {
@@ -469,7 +481,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.12-wifi-return 已加载', 'version');
+    logToServer('【版本】V6.13-p2p-grace 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -938,16 +950,34 @@ function clearPostAnswerConnectWatchdog(deviceId) {
 
 function schedulePostAnswerConnectWatchdog(deviceId) {
   clearPostAnswerConnectWatchdog(deviceId);
+  const delay = isNetworkTransition(deviceId) ? 20000 : 12000;
   postAnswerConnectWatchdog[deviceId] = setTimeout(() => {
     delete postAnswerConnectWatchdog[deviceId];
     const pc = peerConnections[deviceId];
     if (!pc || pc._useTURN || pc._p2pVerified) return;
     const ice = pc.iceConnectionState;
-    if (ice === 'connected' || ice === 'completed') return;
+    if (ice === 'connected' || ice === 'completed') {
+      delete _postAnswerExtendCount[deviceId];
+      return;
+    }
+    if (ice === 'checking' || ice === 'connecting' || ice === 'new') {
+      const ext = (_postAnswerExtendCount[deviceId] || 0) + 1;
+      _postAnswerExtendCount[deviceId] = ext;
+      const maxExt = isNetworkTransition(deviceId) ? 6 : 2;
+      if (ext <= maxExt) {
+        logToServer(
+          'answer 后 ICE 仍在协商(' + ice + ') 延长等待 #' + ext + ' device=' + deviceId,
+          'network'
+        );
+        schedulePostAnswerConnectWatchdog(deviceId);
+        return;
+      }
+    }
+    delete _postAnswerExtendCount[deviceId];
     if (_p2pRestarting[deviceId]) return;
-    logToServer('answer 后 ICE 未连上，完整 P2P 重连 device=' + deviceId, 'network');
-    restartP2P(deviceId);
-  }, 6000);
+    logToServer('answer 后 ICE 未连上(' + ice + ')，完整 P2P 重连 device=' + deviceId, 'network');
+    restartP2P(deviceId, { fromWatchdog: true });
+  }, delay);
 }
 
 function scheduleP2PFailoverToTurn(deviceId) {
@@ -1043,21 +1073,29 @@ function handleNetworkChangedImmediate(deviceId) {
   clearConnectWatchdog(deviceId);
   clearIceRestartAnswerTimeout(deviceId);
   clearPostAnswerConnectWatchdog(deviceId);
+  markNetworkTransition(deviceId, 30000);
   logToServer('receiver 网络切换，完整 P2P 重连 device=' + deviceId, 'network');
   restartP2P(deviceId);
 }
 
-function restartP2P(deviceId) {
+function restartP2P(deviceId, opts) {
   if (!deviceList[deviceId] || !localAudioTrack) return;
   if (_p2pRestarting[deviceId]) return;
 
   const mainPc = peerConnections[deviceId];
   if (mainPc && mainPc._useTURN) return;
 
-  _p2pRestartCount[deviceId] = (_p2pRestartCount[deviceId] || 0) + 1;
+  const fromWatchdog = !!(opts && opts.fromWatchdog);
+  if (!fromWatchdog || !isNetworkTransition(deviceId)) {
+    _p2pRestartCount[deviceId] = (_p2pRestartCount[deviceId] || 0) + 1;
+  }
   if (_p2pRestartCount[deviceId] > 3) {
-    if (_turnRelayUnavailable) {
-      logToServer('P2P 重连过多但 TURN 不可用，force-rejoin 后重试 deviceId=' + deviceId, 'network');
+    if (_turnRelayUnavailable || isNetworkTransition(deviceId)) {
+      logToServer(
+        'P2P 重连过多（' + (isNetworkTransition(deviceId) ? '切网保护' : 'TURN不可用') +
+        '），force-rejoin deviceId=' + deviceId,
+        'network'
+      );
       _p2pRestartCount[deviceId] = 0;
       if (ws && ws.readyState === 1) {
         ws.send(JSON.stringify({ type: 'force-rejoin', targetReceiverId: deviceId }));
@@ -1548,6 +1586,8 @@ function migrateDeviceId(oldId, newId) {
   rekeyDeviceMap(_offerRetryCount, oldId, newId);
   rekeyDeviceMap(postAnswerConnectWatchdog, oldId, newId);
   rekeyDeviceMap(_networkChangeDebounce, oldId, newId);
+  rekeyDeviceMap(_networkTransitionUntil, oldId, newId);
+  rekeyDeviceMap(_postAnswerExtendCount, oldId, newId);
 }
 
 function registerDevice(devId, serverCount) {

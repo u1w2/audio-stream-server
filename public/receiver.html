@@ -415,6 +415,7 @@ function resumePlaybackAfterReconnect() {
     }
   }
   if (!p2pRemoteStream) return;
+  logToServer('resumePlaybackAfterReconnect reconnecting=' + _reconnecting, 'media');
   startPlayback(false);
   document.getElementById('playHint').textContent = '';
   setStatus('playing', '播放中');
@@ -735,7 +736,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.12-wifi-return joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.13-p2p-grace joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
@@ -1076,6 +1077,7 @@ function handleProbeOffer(msg) {
 
 function startPlayback(isTurn) {
   if (!p2pRemoteStream) return;
+  logToServer('startPlayback isTurn=' + !!isTurn + ' ice=' + (p2pPC ? p2pPC.iceConnectionState : 'none'), 'media');
 
   if (audioCtx && audioCtx.state === 'suspended') {
     audioCtx.resume();
