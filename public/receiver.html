@@ -182,10 +182,32 @@ function notifyNetworkChanged() {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'network-changed', receiverId: myReceiverId }));
     }
-  }, 400);
+  }, 200);
 }
 
 let _networkChangeTimer = null;
+let _roomBroadcast = null;
+
+function setupRoomBroadcast(code) {
+  if (!('BroadcastChannel' in window) || !code) return;
+  if (_roomBroadcast) {
+    try { _roomBroadcast.close(); } catch (_) {}
+  }
+  const ch = new BroadcastChannel('audio-stream-' + code);
+  const myTs = Date.now();
+  ch.postMessage({ type: 'takeover', ts: myTs });
+  ch.onmessage = (e) => {
+    if (e.data?.type === 'takeover' && e.data.ts > myTs) {
+      logToServer('新标签页接管会话，本页 leave', 'session');
+      sendLeave();
+      closePCIntentionally();
+      if (ws) {
+        try { ws.close(); } catch (_) {}
+      }
+    }
+  };
+  _roomBroadcast = ch;
+}
 
 function notifyConnectionLost() {
   if (_reconnecting || probePC || turnProbePC) return;
@@ -349,10 +371,18 @@ function bindReceiverIceHandlers(pc, useTurn) {
     } else if (ice === 'failed') {
       clearReceiverDisconnectTimer();
       _reconnecting = false;
+      if (!_onTurn && !turnProbePC) {
+        logToServer('ice failed，通知 network-changed', 'network');
+        notifyNetworkChanged();
+      }
       notifyConnectionLost();
       document.getElementById('playHint').textContent = '连接断开，等待重连...';
       setStatus('buffering', '重连中...');
     } else if (ice === 'disconnected') {
+      if (!_onTurn && !turnProbePC) {
+        logToServer('ice disconnected，通知 network-changed', 'network');
+        notifyNetworkChanged();
+      }
       clearReceiverDisconnectTimer();
       _receiverDisconnectTimer = setTimeout(() => {
         _receiverDisconnectTimer = null;
@@ -364,7 +394,7 @@ function bindReceiverIceHandlers(pc, useTurn) {
           document.getElementById('playHint').textContent = '连接断开，等待重连...';
           setStatus('buffering', '重连中...');
         }
-      }, 2500);
+      }, 1200);
     }
   };
 
@@ -456,6 +486,7 @@ async function activatePlayback(ctx) {
 
     await connectWS();
     roomCode = pendingCode;
+    setupRoomBroadcast(pendingCode);
     document.getElementById('playHint').textContent = '等待音频...';
     ws.send(JSON.stringify({ type: 'join', code: pendingCode }));
   } catch (err) {
@@ -483,6 +514,7 @@ async function manualJoin() {
   try {
     await connectWS();
     roomCode = code;
+    setupRoomBroadcast(code);
     ws.send(JSON.stringify({ type: 'join', code }));
   } catch (err) {
     alert('连接服务器失败');
@@ -615,7 +647,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.5-stale-receiver-cleanup joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.6-fast-network-switch joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();

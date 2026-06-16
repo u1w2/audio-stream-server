@@ -328,7 +328,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.5-stale-receiver-cleanup 已加载', 'version');
+    logToServer('【版本】V6.6-fast-network-switch 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -470,8 +470,7 @@ function handleSignaling(msg) {
 
     case 'network-changed':
       if (msg.receiverId && deviceList[msg.receiverId]) {
-        logToServer('receiver 网络切换，ICE restart');
-        restartIceP2P(msg.receiverId);
+        handleNetworkChanged(msg.receiverId);
       }
       break;
 
@@ -758,7 +757,9 @@ async function restartIceP2P(deviceId) {
   clearConnectWatchdog(deviceId);
 
   try {
+    const fastVerify = !!pc._p2pVerified;
     pc._p2pVerified = false;
+    pc._fastVerify = fastVerify;
     const offer = await pc.createOffer({ iceRestart: true });
     await pc.setLocalDescription(offer);
     if (ws && ws.readyState === 1) {
@@ -780,6 +781,18 @@ async function restartIceP2P(deviceId) {
   }
 
   setTimeout(() => { delete _p2pRestarting[deviceId]; }, 3000);
+}
+
+function handleNetworkChanged(deviceId) {
+  if (!deviceList[deviceId] || !localAudioTrack) return;
+  _iceRestartCount[deviceId] = 0;
+  _p2pRestartCount[deviceId] = 0;
+  delete _p2pRestarting[deviceId];
+  clearP2PFailoverTimer(deviceId);
+  clearConnectWatchdog(deviceId);
+  clearIceRestartAnswerTimeout(deviceId);
+  logToServer('receiver 网络切换，ICE restart device=' + deviceId, 'network');
+  restartIceP2P(deviceId);
 }
 
 function restartP2P(deviceId) {
@@ -831,6 +844,9 @@ async function verifyMainP2PMedia(deviceId, pc) {
   let lastBytes = 0;
   let stableCount = 0;
   let checks = 0;
+  const needStable = pc._fastVerify ? 1 : 2;
+  const maxChecks = pc._fastVerify ? 3 : 4;
+  const intervalMs = pc._fastVerify ? 300 : 500;
 
   const check = async () => {
     if (peerConnections[deviceId] !== pc || pc._useTURN) return;
@@ -863,20 +879,21 @@ async function verifyMainP2PMedia(deviceId, pc) {
         stableCount++;
         lastBytes = bytes;
       }
-      if (stableCount >= 2) {
+      if (stableCount >= needStable) {
         pc._p2pVerified = true;
+        pc._fastVerify = false;
         updateDeviceMode(deviceId, 'p2p');
         enterP2PMode(deviceId, pc);
         return;
       }
     } catch (_) {}
 
-    if (checks >= 4) {
-      logToServer('P2P 无媒体流，ICE restart');
+    if (checks >= maxChecks) {
+      logToServer('P2P 无媒体流，ICE restart device=' + deviceId, 'media');
       restartIceP2P(deviceId);
       return;
     }
-    p2pMediaVerifyTimers[deviceId] = setTimeout(check, 500);
+    p2pMediaVerifyTimers[deviceId] = setTimeout(check, intervalMs);
   };
 
   check();
