@@ -207,7 +207,8 @@ wss.on('connection', (ws) => {
       case 'webrtc-answer':
       case 'webrtc-ice':
       case 'reconnect-p2p':
-      case 'reconnect-relay': {
+      case 'reconnect-relay':
+      case 'p2p-check': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
         console.log(`[Signal] ${msg.type} from ${currentRole} room=${currentRoom} targetId=${msg.targetReceiverId||''} recvId=${msg.receiverId||''}`);

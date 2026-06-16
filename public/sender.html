@@ -281,10 +281,18 @@ function startRelay(stream) {
     relayRecorder.ondataavailable = (e) => {
       if (e.data.size > 0 && ws && ws.readyState === 1) {
         ws.send(e.data);
+        window._relaySentBytes = (window._relaySentBytes || 0) + e.data.size;
+        window._relaySentCount = (window._relaySentCount || 0) + 1;
       }
+    };
+    relayRecorder.onerror = (e) => {
+      console.log('[Relay] Recorder error:', e);
     };
     // 每 100ms 发一次数据，降低延迟
     relayRecorder.start(100);
+    window._relaySentBytes = 0;
+    window._relaySentCount = 0;
+    console.log('[Relay] Started at 16kbps, state:', relayRecorder.state);
     // 标记所有设备为中继模式
     Object.keys(deviceList).forEach(devId => {
       updateDeviceMode(devId, 'relay');
