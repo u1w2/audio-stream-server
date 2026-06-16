@@ -115,10 +115,13 @@ let audioCtx = null; // 用户手势激活的 AudioContext
 // WebRTC
 let p2pPC = null;
 let probePC = null;
+let turnProbePC = null;
 let p2pRemoteStream = null;
 let probeRemoteStream = null;
+let turnProbeRemoteStream = null;
 let pendingCandidates = [];
 let probePendingCandidates = [];
+let turnProbePendingCandidates = [];
 let _onTurn = false;
 const ICE_SERVERS = [
   { urls: 'stun:stun.qq.com:3478' },
@@ -126,6 +129,11 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'turn:39.101.174.208:3478', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
   { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
+];
+const STUN_SERVERS = [
+  { urls: 'stun:stun.qq.com:3478' },
+  { urls: 'stun:stun.aliyun.com:3478' },
+  { urls: 'stun:stun.l.google.com:19302' },
 ];
 
 // Store code from URL
@@ -145,7 +153,7 @@ function setTurnUI(on) {
 }
 
 function notifyConnectionLost() {
-  if (_reconnecting || probePC) return;
+  if (_reconnecting || probePC || turnProbePC) return;
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({
       type: 'connection-lost',
@@ -172,6 +180,31 @@ function cleanupProbePC() {
   probePC = null;
   probeRemoteStream = null;
   probePendingCandidates = [];
+}
+
+function cleanupTurnProbePC() {
+  if (!turnProbePC) return;
+  turnProbePC._intentionalClose = true;
+  turnProbePC.close();
+  turnProbePC = null;
+  turnProbeRemoteStream = null;
+  turnProbePendingCandidates = [];
+}
+
+function promoteTurnProbeConnection() {
+  if (!turnProbePC || !turnProbeRemoteStream) return;
+  _reconnecting = false;
+  closePCIntentionally();
+  p2pPC = turnProbePC;
+  turnProbePC = null;
+  p2pRemoteStream = turnProbeRemoteStream;
+  turnProbeRemoteStream = null;
+  pendingCandidates = turnProbePendingCandidates;
+  turnProbePendingCandidates = [];
+  _lastOfferUseTURN = true;
+  bindReceiverIceHandlers(p2pPC, true);
+  startPlayback(true);
+  console.log('[Receiver] TURN 探测成功，已切换');
 }
 
 function promoteProbeConnection() {
@@ -409,7 +442,7 @@ function sendBitrate(br) {
 // --- TURN 检测（辅助） ---
 let _lastOfferUseTURN = false;
 function detectRelayMode() {
-  if (!p2pPC || _onTurn || probePC) return;
+  if (!p2pPC || _onTurn || probePC || turnProbePC) return;
   p2pPC.getStats().then(stats => {
     let hasRelay = false;
     stats.forEach(report => {
@@ -510,6 +543,14 @@ function handleSignaling(msg) {
       }
       break;
 
+    case 'turn-probe-start':
+      console.log('[Receiver] sender 并行探测 TURN，P2P 主连接保持播放');
+      break;
+
+    case 'turn-probe-commit':
+      promoteTurnProbeConnection();
+      break;
+
     case 'p2p-probe-start':
       console.log('[Receiver] sender 并行探测 P2P，主连接保持播放');
       break;
@@ -523,7 +564,7 @@ function handleSignaling(msg) {
       break;
 
     case 'reconnect-relay':
-      console.log('[Receiver] 切换到 TURN，等待新 offer');
+      console.log('[Receiver] 直接切换 TURN（无并行探测）');
       _reconnecting = true;
       closePCIntentionally();
       _lastOfferUseTURN = true;
@@ -536,6 +577,14 @@ function handleSignaling(msg) {
       break;
 
     case 'webrtc-ice':
+      if (msg.isTurnProbe) {
+        if (turnProbePC) {
+          turnProbePC.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
+        } else if (msg.candidate) {
+          turnProbePendingCandidates.push(msg.candidate);
+        }
+        break;
+      }
       if (msg.isProbe) {
         if (probePC) {
           probePC.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
@@ -566,6 +615,10 @@ function handleSignaling(msg) {
 
 // --- WebRTC: Handle incoming offer from sender ---
 function handleWebRTCOffer(msg) {
+  if (msg.isTurnProbe) {
+    handleTurnProbeOffer(msg);
+    return;
+  }
   if (msg.isProbe) {
     handleProbeOffer(msg);
     return;
@@ -577,14 +630,12 @@ function handleWebRTCOffer(msg) {
   }
 
   const useTurn = !!msg.useTURN;
-  const servers = useTurn ? ICE_SERVERS : [
-    { urls: 'stun:stun.qq.com:3478' },
-    { urls: 'stun:stun.aliyun.com:3478' },
-    { urls: 'stun:stun.l.google.com:19302' },
-  ];
+  const pcConfig = useTurn
+    ? { iceServers: ICE_SERVERS, iceTransportPolicy: 'relay' }
+    : { iceServers: STUN_SERVERS };
   _lastOfferUseTURN = useTurn;
   console.log('[Receiver] 创建连接 useTURN=' + useTurn);
-  p2pPC = new RTCPeerConnection({ iceServers: servers });
+  p2pPC = new RTCPeerConnection(pcConfig);
 
   p2pPC.ontrack = (e) => {
     p2pRemoteStream = e.streams[0];
@@ -618,11 +669,50 @@ function handleWebRTCOffer(msg) {
   });
 }
 
-const STUN_SERVERS = [
-  { urls: 'stun:stun.qq.com:3478' },
-  { urls: 'stun:stun.aliyun.com:3478' },
-  { urls: 'stun:stun.l.google.com:19302' },
-];
+function handleTurnProbeOffer(msg) {
+  cleanupTurnProbePC();
+
+  turnProbePC = new RTCPeerConnection({
+    iceServers: ICE_SERVERS,
+    iceTransportPolicy: 'relay',
+  });
+  turnProbePC.ontrack = (e) => {
+    turnProbeRemoteStream = e.streams[0] || new MediaStream([e.track]);
+  };
+  turnProbePC.onicecandidate = (e) => {
+    if (e.candidate && ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'webrtc-ice',
+        receiverId: myReceiverId,
+        isTurnProbe: true,
+        candidate: e.candidate.toJSON(),
+      }));
+    }
+  };
+  turnProbePC.oniceconnectionstatechange = () => {
+    if (turnProbePC._intentionalClose) return;
+    if (turnProbePC.iceConnectionState === 'failed') {
+      cleanupTurnProbePC();
+    }
+  };
+
+  turnProbePC.setRemoteDescription(new RTCSessionDescription(msg.sdp)).then(() => {
+    turnProbePendingCandidates.forEach(c => {
+      turnProbePC.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
+    });
+    turnProbePendingCandidates = [];
+    return turnProbePC.createAnswer();
+  }).then(answer => turnProbePC.setLocalDescription(answer)).then(() => {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'webrtc-answer',
+        receiverId: myReceiverId,
+        isTurnProbe: true,
+        sdp: turnProbePC.localDescription.toJSON(),
+      }));
+    }
+  }).catch(() => cleanupTurnProbePC());
+}
 
 function handleProbeOffer(msg) {
   cleanupProbePC();
@@ -696,6 +786,7 @@ function startPlayback(isTurn) {
 function stopPlayback() {
   clearReceiverDisconnectTimer();
   cleanupProbePC();
+  cleanupTurnProbePC();
   const audioEl = document.getElementById('p2pAudio');
   if (audioEl.srcObject) audioEl.srcObject = null;
   if (p2pPC) { p2pPC.close(); p2pPC = null; }

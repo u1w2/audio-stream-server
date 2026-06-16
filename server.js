@@ -230,6 +230,8 @@ wss.on('connection', (ws) => {
       case 'reconnect-relay':
       case 'p2p-probe-start':
       case 'p2p-probe-commit':
+      case 'turn-probe-start':
+      case 'turn-probe-commit':
       case 'connection-lost': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];

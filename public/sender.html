@@ -152,6 +152,7 @@ const TURN_BITRATE = 16000;
 const P2P_RETRY_INTERVAL_MS = 15000;
 const P2P_PROBE_TIMEOUT_MS = 20000;
 const P2P_PROBE_FAIL_BACKOFF_MS = 45000;
+const TURN_PROBE_TIMEOUT_MS = 20000;
 const ICE_DISCONNECTED_GRACE_MS = 2500;
 const disconnectTimers = {};
 // 调试日志：通过 WebSocket 发送到服务端
@@ -178,12 +179,16 @@ function clearDisconnectTimer(deviceId) {
 }
 
 function handlePeerLost(deviceId, pc) {
-  if (pc._intentionalClose || pc._isProbe) return;
+  if (pc._intentionalClose || pc._isProbe || pc._isTurnProbe) return;
   if (!deviceList[deviceId] || !localAudioTrack) return;
   if (peerConnections[deviceId] !== pc) return;
-  logToServer('连接丢失 useTURN=' + !!pc._useTURN);
+  if (!pc._useTURN) {
+    startTurnProbe(deviceId);
+    return;
+  }
+  logToServer('TURN 主连接丢失');
   cleanupPeerConnection(deviceId);
-  upgradeToTurn(deviceId);
+  createDirectTurn(deviceId);
 }
 
 function bindIceHandlers(deviceId, pc, useTURN) {
@@ -193,6 +198,7 @@ function bindIceHandlers(deviceId, pc, useTURN) {
 
     if (ice === 'connected' || ice === 'completed') {
       clearDisconnectTimer(deviceId);
+      if (!useTURN) cleanupTurnProbeConnection(deviceId);
       updateDeviceMode(deviceId, useTURN ? 'turn' : 'p2p');
       if (useTURN) {
         enterTurnMode(deviceId, pc);
@@ -203,6 +209,7 @@ function bindIceHandlers(deviceId, pc, useTURN) {
       clearDisconnectTimer(deviceId);
       handlePeerLost(deviceId, pc);
     } else if (ice === 'disconnected') {
+      if (!useTURN) startTurnProbe(deviceId);
       clearDisconnectTimer(deviceId);
       disconnectTimers[deviceId] = setTimeout(() => {
         delete disconnectTimers[deviceId];
@@ -303,7 +310,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V5-parallel-p2p-probe 已加载');
+    logToServer('【版本】V6-parallel-turn-probe 已加载');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -355,9 +362,7 @@ function handleSignaling(msg) {
       break;
 
     case 'webrtc-answer': {
-      const pc = msg.isProbe
-        ? probeConnections[msg.receiverId]
-        : peerConnections[msg.receiverId];
+      const pc = resolvePC(msg.receiverId, msg.isProbe, msg.isTurnProbe);
       if (pc) {
         pc.setRemoteDescription(new RTCSessionDescription(msg.sdp)).catch(() => {});
       }
@@ -365,9 +370,7 @@ function handleSignaling(msg) {
     }
 
     case 'webrtc-ice': {
-      const pc = msg.isProbe
-        ? probeConnections[msg.receiverId]
-        : peerConnections[msg.receiverId];
+      const pc = resolvePC(msg.receiverId, msg.isProbe, msg.isTurnProbe);
       if (pc) {
         pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
       }
@@ -377,6 +380,7 @@ function handleSignaling(msg) {
     case 'peer-left': {
       if (msg.receiverId && deviceList[msg.receiverId]) {
         cleanupProbeConnection(msg.receiverId);
+        cleanupTurnProbeConnection(msg.receiverId);
         cleanupPeerConnection(msg.receiverId);
         delete deviceList[msg.receiverId];
       } else {
@@ -399,6 +403,7 @@ function handleSignaling(msg) {
 
     case 'peer-disconnected':
       Object.keys(probeConnections).forEach(id => cleanupProbeConnection(id));
+      Object.keys(turnProbeConnections).forEach(id => cleanupTurnProbeConnection(id));
       Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
       deviceList = {};
       deviceCounter = 0;
@@ -431,10 +436,12 @@ function handleSignaling(msg) {
           logToServer('忽略 connection-lost（P2P 并行探测中）');
           break;
         }
-        logToServer('receiver 报告连接丢失');
-        const pc = peerConnections[msg.receiverId];
-        if (pc) cleanupPeerConnection(msg.receiverId, true);
-        upgradeToTurn(msg.receiverId);
+        if (turnProbeConnections[msg.receiverId]) {
+          logToServer('忽略 connection-lost（TURN 并行探测中）');
+          break;
+        }
+        logToServer('receiver 报告连接丢失，启动 TURN 并行探测');
+        startTurnProbe(msg.receiverId);
       }
       break;
 
@@ -452,9 +459,42 @@ const STUN_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
 ];
 
+function turnPcConfig() {
+  return { iceServers: ICE_SERVERS, iceTransportPolicy: 'relay' };
+}
+
+function resolvePC(deviceId, isProbe, isTurnProbe) {
+  if (isTurnProbe) return turnProbeConnections[deviceId];
+  if (isProbe) return probeConnections[deviceId];
+  return peerConnections[deviceId];
+}
+
+function attachAudioTrack(pc) {
+  if (localAudioTrack) {
+    pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
+  }
+}
+
+function wireIceCandidate(deviceId, pc, flags) {
+  pc.onicecandidate = (e) => {
+    if (e.candidate && ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'webrtc-ice',
+        targetReceiverId: deviceId,
+        ...flags,
+        candidate: e.candidate.toJSON(),
+      }));
+    }
+  };
+}
+
+function scheduleBitrate(pc, bitrate) {
+  setTimeout(() => applyBitrateToPC(pc, bitrate), 100);
+  setTimeout(() => applyBitrateToPC(pc, bitrate), 2000);
+}
+
 function createPC(deviceId, useTURN, isProbe) {
-  const servers = useTURN ? ICE_SERVERS : STUN_SERVERS;
-  const pc = new RTCPeerConnection({ iceServers: servers });
+  const pc = new RTCPeerConnection(useTURN ? turnPcConfig() : { iceServers: STUN_SERVERS });
   if (isProbe) {
     probeConnections[deviceId] = pc;
     pc._isProbe = true;
@@ -462,24 +502,9 @@ function createPC(deviceId, useTURN, isProbe) {
     peerConnections[deviceId] = pc;
   }
 
-  if (localAudioTrack) {
-    pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
-  }
-
-  const initialBitrate = useTURN ? TURN_BITRATE : selectedBitrate;
-  setTimeout(() => applyBitrateToPC(pc, initialBitrate), 100);
-  setTimeout(() => applyBitrateToPC(pc, initialBitrate), 2000);
-
-  pc.onicecandidate = (e) => {
-    if (e.candidate && ws.readyState === 1) {
-      ws.send(JSON.stringify({
-        type: 'webrtc-ice',
-        targetReceiverId: deviceId,
-        isProbe: !!isProbe,
-        candidate: e.candidate.toJSON(),
-      }));
-    }
-  };
+  attachAudioTrack(pc);
+  scheduleBitrate(pc, useTURN ? TURN_BITRATE : selectedBitrate);
+  wireIceCandidate(deviceId, pc, { isProbe: !!isProbe });
 
   if (isProbe) {
     bindProbeIceHandlers(deviceId, pc);
@@ -490,25 +515,53 @@ function createPC(deviceId, useTURN, isProbe) {
   return pc;
 }
 
-function upgradeToTurn(deviceId) {
-  if (!deviceList[deviceId] || peerConnections[deviceId]) return;
-  if (probeConnections[deviceId]) return;
-  logToServer('升级 TURN deviceId=' + deviceId);
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
-  }
-  const pc = createPC(deviceId, true);
-  if (!pc) return;
-  pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
+function createTurnProbePC(deviceId) {
+  const pc = new RTCPeerConnection(turnPcConfig());
+  turnProbeConnections[deviceId] = pc;
+  pc._isTurnProbe = true;
+  attachAudioTrack(pc);
+  scheduleBitrate(pc, TURN_BITRATE);
+  wireIceCandidate(deviceId, pc, { isTurnProbe: true });
+  bindTurnProbeIceHandlers(deviceId, pc);
+  pc._useTURN = true;
+  return pc;
+}
+
+function sendTurnOffer(deviceId, pc, flags) {
+  return pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({
         type: 'webrtc-offer',
         targetReceiverId: deviceId,
         useTURN: true,
+        ...flags,
         sdp: pc.localDescription.toJSON(),
       }));
     }
-  }).catch(() => cleanupPeerConnection(deviceId));
+  });
+}
+
+function createDirectTurn(deviceId) {
+  if (!deviceList[deviceId] || peerConnections[deviceId]) return;
+  if (turnProbeConnections[deviceId]) return;
+  logToServer('直接建立 TURN deviceId=' + deviceId);
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
+  }
+  const pc = createPC(deviceId, true, false);
+  if (!pc) return;
+  sendTurnOffer(deviceId, pc, {}).catch(() => cleanupPeerConnection(deviceId));
+}
+
+function upgradeToTurn(deviceId) {
+  if (!deviceList[deviceId]) return;
+  const mainPc = peerConnections[deviceId];
+  if (mainPc && !mainPc._useTURN) {
+    startTurnProbe(deviceId);
+    return;
+  }
+  if (mainPc || turnProbeConnections[deviceId]) return;
+  createDirectTurn(deviceId);
 }
 
 function startP2P(deviceId) {
@@ -530,9 +583,38 @@ function startP2P(deviceId) {
 
 let _p2pRetrying = {};
 let probeConnections = {};
+let turnProbeConnections = {};
 let probeTimeouts = {};
+let turnProbeTimeouts = {};
 let probeVerifyTimers = {};
+let turnProbeVerifyTimers = {};
 let probeFailBackoff = {};
+let _turnProbeRetrying = {};
+
+function clearTurnProbeTimeout(deviceId) {
+  if (turnProbeTimeouts[deviceId]) {
+    clearTimeout(turnProbeTimeouts[deviceId]);
+    delete turnProbeTimeouts[deviceId];
+  }
+}
+
+function clearTurnProbeVerifyTimer(deviceId) {
+  if (turnProbeVerifyTimers[deviceId]) {
+    clearTimeout(turnProbeVerifyTimers[deviceId]);
+    delete turnProbeVerifyTimers[deviceId];
+  }
+}
+
+function cleanupTurnProbeConnection(deviceId) {
+  clearTurnProbeTimeout(deviceId);
+  clearTurnProbeVerifyTimer(deviceId);
+  const pc = turnProbeConnections[deviceId];
+  if (pc) {
+    pc._intentionalClose = true;
+    pc.close();
+    delete turnProbeConnections[deviceId];
+  }
+}
 
 function clearProbeTimeout(deviceId) {
   if (probeTimeouts[deviceId]) {
@@ -647,6 +729,131 @@ function commitProbeSwitch(deviceId, probePc) {
   enterP2PMode(deviceId, probePc);
 }
 
+function failTurnProbe(deviceId, reason) {
+  logToServer(reason + ' deviceId=' + deviceId);
+  cleanupTurnProbeConnection(deviceId);
+  const mainPc = peerConnections[deviceId];
+  if (mainPc && !mainPc._useTURN) return;
+  createDirectTurn(deviceId);
+}
+
+function bindTurnProbeIceHandlers(deviceId, pc) {
+  pc.oniceconnectionstatechange = () => {
+    const ice = pc.iceConnectionState;
+    logToServer('turn-probe ice=' + ice);
+    if (ice === 'connected' || ice === 'completed') {
+      verifyTurnProbeMedia(deviceId, pc);
+    } else if (ice === 'failed') {
+      failTurnProbe(deviceId, 'TURN probe ICE failed');
+    }
+  };
+}
+
+async function verifyTurnProbeMedia(deviceId, pc) {
+  if (pc._verifying || pc._verified) return;
+  if (turnProbeConnections[deviceId] !== pc) return;
+  pc._verifying = true;
+
+  let lastBytes = 0;
+  let stableCount = 0;
+  let checks = 0;
+
+  const check = async () => {
+    if (turnProbeConnections[deviceId] !== pc) return;
+    const ice = pc.iceConnectionState;
+    if (ice !== 'connected' && ice !== 'completed') {
+      pc._verifying = false;
+      return;
+    }
+
+    checks++;
+    try {
+      const stats = await pc.getStats();
+      let bytes = 0;
+      let hasRelay = false;
+      stats.forEach(report => {
+        if (report.type === 'outbound-rtp' && report.kind === 'audio') {
+          bytes = report.bytesSent || 0;
+        }
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          if (report.localCandidateType === 'relay' || report.remoteCandidateType === 'relay') {
+            hasRelay = true;
+          }
+        }
+      });
+
+      if (!hasRelay) {
+        if (checks >= 6) {
+          failTurnProbe(deviceId, 'TURN probe 未走 relay');
+          return;
+        }
+        turnProbeVerifyTimers[deviceId] = setTimeout(check, 500);
+        return;
+      }
+      if (bytes > lastBytes) {
+        stableCount++;
+        lastBytes = bytes;
+      }
+      if (stableCount >= 2) {
+        commitTurnProbeSwitch(deviceId, pc);
+        return;
+      }
+    } catch (_) {}
+
+    if (checks >= 10) {
+      failTurnProbe(deviceId, 'TURN probe 无媒体流');
+      return;
+    }
+    turnProbeVerifyTimers[deviceId] = setTimeout(check, 500);
+  };
+
+  check();
+}
+
+function commitTurnProbeSwitch(deviceId, probePc) {
+  if (turnProbeConnections[deviceId] !== probePc || probePc._verified) return;
+  probePc._verified = true;
+  clearTurnProbeTimeout(deviceId);
+  clearTurnProbeVerifyTimer(deviceId);
+  logToServer('TURN 探测成功，切换 deviceId=' + deviceId);
+
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'turn-probe-commit', targetReceiverId: deviceId }));
+  }
+
+  cleanupPeerConnection(deviceId, true);
+  delete turnProbeConnections[deviceId];
+  probePc._isTurnProbe = false;
+  peerConnections[deviceId] = probePc;
+  bindIceHandlers(deviceId, probePc, true);
+  enterTurnMode(deviceId, probePc);
+}
+
+function startTurnProbe(deviceId) {
+  if (!deviceList[deviceId] || !localAudioTrack || _turnProbeRetrying[deviceId]) return;
+  const mainPc = peerConnections[deviceId];
+  if (!mainPc || mainPc._useTURN) return;
+  if (turnProbeConnections[deviceId]) return;
+
+  _turnProbeRetrying[deviceId] = true;
+  logToServer('并行探测 TURN deviceId=' + deviceId);
+
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'turn-probe-start', targetReceiverId: deviceId }));
+  }
+
+  const probePc = createTurnProbePC(deviceId);
+  sendTurnOffer(deviceId, probePc, { isTurnProbe: true })
+    .catch(() => failTurnProbe(deviceId, 'TURN probe offer 失败'));
+
+  clearTurnProbeTimeout(deviceId);
+  turnProbeTimeouts[deviceId] = setTimeout(() => {
+    if (turnProbeConnections[deviceId]) failTurnProbe(deviceId, 'TURN 探测超时');
+  }, TURN_PROBE_TIMEOUT_MS);
+
+  setTimeout(() => { delete _turnProbeRetrying[deviceId]; }, 8000);
+}
+
 function failProbe(deviceId, reason) {
   logToServer(reason + ' deviceId=' + deviceId);
   cleanupProbeConnection(deviceId);
@@ -734,6 +941,7 @@ function migrateDeviceId(oldId, newId) {
   delete deviceList[oldId];
   rekeyDeviceMap(peerConnections, oldId, newId);
   rekeyDeviceMap(probeConnections, oldId, newId);
+  rekeyDeviceMap(turnProbeConnections, oldId, newId);
   rekeyDeviceMap(disconnectTimers, oldId, newId);
   rekeyDeviceMap(_relayRetryTimer, oldId, newId);
   rekeyDeviceMap(probeTimeouts, oldId, newId);
@@ -848,6 +1056,7 @@ function updateConnCount() {
 function stopStreaming() {
   Object.keys(_relayRetryTimer).forEach(id => clearP2PRetry(id));
   Object.keys(probeConnections).forEach(id => cleanupProbeConnection(id));
+  Object.keys(turnProbeConnections).forEach(id => cleanupTurnProbeConnection(id));
   if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
   localAudioTrack = null;
   Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
