@@ -96,6 +96,7 @@
     </div>
     <p style="color:#666; font-size:12px;" id="playHint">连接中...</p>
     <audio id="p2pAudio" autoplay style="display:none;"></audio>
+    <div id="relayDebug" style="margin-top:8px; padding:6px 8px; background:rgba(0,0,0,0.3); border-radius:6px; font-size:10px; color:#888; font-family:monospace; text-align:left; max-height:80px; overflow-y:auto; display:none;"></div>
     <div id="bitrateControl" class="hidden" style="margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.06);">
       <label style="font-size:12px; color:#888; display:block; margin-bottom:6px;">音质</label>
       <div id="brToggle" class="br-toggle"></div>
@@ -150,6 +151,13 @@ function clearRelayP2PCheck() {
   if (_relayP2PCheckTimer) { clearInterval(_relayP2PCheckTimer); _relayP2PCheckTimer = null; }
 }
 
+function relayDebug(msg) {
+  const el = document.getElementById("relayDebug");
+  if (!el) return;
+  el.style.display = "block";
+  el.textContent = new Date().toLocaleTimeString() + " " + msg + "\n" + el.textContent;
+  if (el.textContent.length > 2000) el.textContent = el.textContent.slice(0, 2000);
+}
 function initRelayPlayback() {
   // 不需要初始化——Blob 播放不需要 MediaSource
   console.log('[Relay] Blob播放模式');
@@ -159,24 +167,24 @@ function appendRelayData(buf) {
   const wasEmpty = relayDataChunks.length === 0;
   relayDataChunks.push(buf);
   if (!relayBlobPlaying) {
-    console.log('[Relay] appendRelayData: triggering playRelayChunk, wasEmpty:', wasEmpty, 'now total chunks:', relayDataChunks.length);
+    relayDebug("appendRelayData"); console.log('[Relay] appendRelayData: triggering playRelayChunk, wasEmpty:', wasEmpty, 'now total chunks:', relayDataChunks.length);
     playRelayChunk();
   }
 }
 
 function playRelayChunk() {
-  console.log('[Relay] playRelayChunk called, chunks:', relayDataChunks.length, 'blobPlaying:', relayBlobPlaying);
+  relayDebug("playRelayChunk chunks="+relayDataChunks.length); console.log('[Relay] playRelayChunk called, chunks:', relayDataChunks.length, 'blobPlaying:', relayBlobPlaying);
   if (relayDataChunks.length === 0) {
     relayBlobPlaying = false;
     return;
   }
   relayBlobPlaying = true;
   const chunks = relayDataChunks.splice(0);
-  console.log('[Relay] Creating Blob from', chunks.length, 'chunks, total bytes:', chunks.reduce((s,c) => s + c.byteLength, 0));
+  relayDebug("Blob bytes="+(chunks.reduce((s,c) => s + c.byteLength, 0))); console.log('[Relay] Creating Blob from', chunks.length, 'chunks, total bytes:', chunks.reduce((s,c) => s + c.byteLength, 0));
   const blob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
   const url = URL.createObjectURL(blob);
   const audioEl = document.getElementById('p2pAudio');
-  console.log('[Relay] Audio element: paused=', audioEl.paused, 'srcObject=', !!audioEl.srcObject, 'src=', typeof audioEl.src);
+  relayDebug("audio paused="+audioEl.paused+" srcObject="+!!audioEl.srcObject); console.log('[Relay] Audio element: paused=', audioEl.paused, 'srcObject=', !!audioEl.srcObject, 'src=', typeof audioEl.src);
   if (audioEl._relayBlobUrl) URL.revokeObjectURL(audioEl._relayBlobUrl);
   audioEl._relayBlobUrl = url;
   // Clear srcObject before setting src (some browsers need this)
@@ -186,9 +194,9 @@ function playRelayChunk() {
   const playPromise = audioEl.play();
   if (playPromise) {
     playPromise.then(() => {
-      console.log('[Relay] play() succeeded');
+      relayDebug('play OK'); console.log('[Relay] play() succeeded');
     }).catch(err => {
-      console.log('[Relay] play() failed:', err.name, err.message);
+      relayDebug('play FAIL: '+err.name); console.log('[Relay] play() failed:', err.name, err.message);
     });
   }
   // 当前段播完后自动切到下一段（用 timeupdate 检测即将结束）
