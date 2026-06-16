@@ -1,0 +1,34 @@
+---
+description: audio-stream 公网部署、Git 流程与线上调试约定
+alwaysApply: true
+---
+
+# audio-stream 部署与调试
+
+## 公网部署
+
+- **对外域名**：https://www.u1w2.com
+- **反向代理**：Nginx 转发到 Node 进程
+- **应用端口**：`30001`（`PORT=30001`，Nginx 对外 443/80）
+- **信令**：WebSocket 经 Nginx 到同一 Node 服务
+- **默认 host**（二维码/房间 URL）：`server.js` 中 fallback 为 `www.u1w2.com`
+
+本地/测试可参考 `test-webrtc-check.js` 使用 `ws://127.0.0.1:30001`。
+
+## Git 流程
+
+- 有代码或配置改动时：`commit` + `push` 到 Gitee `origin/main`
+- commit 前缀：`add:` / `upd:` / `fix:` / `del:` 等
+- **本会话若无实质改动，不要空 push**
+
+## 线上日志与验证
+
+Sender 通过 WebSocket 发送 `sender-log`，服务端 `server.js` 打印为 `[SenderLog]` 到 **Node stdout**（PM2/systemd 日志或 SSH 查看）。
+
+调试时可：
+
+1. 在 sender/receiver 关键路径调用已有 `logToServer(...)`（sender）或 `console.log`（receiver 浏览器控制台）
+2. SSH 到服务器查看 30001 进程日志，对照 `[SenderLog]` 与 `[Room]` 行
+3. 访问 `https://www.u1w2.com/api/status` 查看房间/连接在线状态
+
+必要时可新增只读日志 API 或短期 debug 文件落盘，便于下载验证；实现前先确认 Nginx 路由与安全边界。
