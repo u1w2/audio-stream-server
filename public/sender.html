@@ -155,10 +155,15 @@ const P2P_PROBE_FAIL_BACKOFF_MS = 45000;
 const TURN_PROBE_TIMEOUT_MS = 20000;
 const ICE_DISCONNECTED_GRACE_MS = 2500;
 const disconnectTimers = {};
-// 调试日志：通过 WebSocket 发送到服务端
-function logToServer(text) {
+// 调试日志：通过 WebSocket 上报到服务端，公网可 /api/debug/logs/download 下载
+function logToServer(text, tag) {
   if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'sender-log', text }));
+    ws.send(JSON.stringify({
+      type: 'client-log',
+      role: 'sender',
+      text,
+      tag: tag || '',
+    }));
   }
   console.log('[Sender] ' + text);
 }
@@ -194,7 +199,7 @@ function handlePeerLost(deviceId, pc) {
 function bindIceHandlers(deviceId, pc, useTURN) {
   pc.oniceconnectionstatechange = () => {
     const ice = pc.iceConnectionState;
-    logToServer('ice=' + ice + ' useTURN=' + useTURN);
+    logToServer('ice=' + ice + ' useTURN=' + useTURN, 'ice');
 
     if (ice === 'connected' || ice === 'completed') {
       clearDisconnectTimer(deviceId);
@@ -321,7 +326,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.3-ice-restart-fast-reconnect 已加载');
+    logToServer('【版本】V6.4-debug-log 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');

@@ -136,6 +136,19 @@ const STUN_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
 ];
 
+function logToServer(text, tag) {
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({
+      type: 'client-log',
+      role: 'receiver',
+      text,
+      tag: tag || '',
+      receiverId: myReceiverId,
+    }));
+  }
+  console.log('[Receiver] ' + text);
+}
+
 // Store code from URL
 let pendingCode = null;
 let _receiverDisconnectTimer = null;
@@ -288,6 +301,7 @@ function startMediaWatchdog() {
       if (silentChecks >= 4) {
         document.getElementById('playHint').textContent = 'P2P 无声音，重连中...';
         setStatus('buffering', '重连中...');
+        logToServer('watchdog: P2P 无声音，通知 network-changed', 'media');
         notifyNetworkChanged();
         return;
       }
@@ -312,7 +326,7 @@ function bindReceiverIceHandlers(pc, useTurn) {
   pc.oniceconnectionstatechange = () => {
     if (pc._intentionalClose) return;
     const ice = pc.iceConnectionState;
-    console.log('[Receiver] ice=' + ice);
+    logToServer('ice=' + ice + ' useTurn=' + useTurn, 'ice');
 
     if (ice === 'connected' || ice === 'completed') {
       clearReceiverDisconnectTimer();
@@ -592,6 +606,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
+      logToServer('【版本】V6.4-debug-log joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
@@ -724,7 +739,7 @@ function handleWebRTCOffer(msg) {
   if (msg.iceRestart && p2pPC && !useTurn && !_lastOfferUseTURN) {
     _reconnecting = false;
     _lastOfferUseTURN = false;
-    console.log('[Receiver] ICE restart 重协商');
+    logToServer('ICE restart 重协商', 'webrtc');
     document.getElementById('playHint').textContent = '网络切换，重连中...';
     setStatus('buffering', '重连中...');
 
@@ -764,7 +779,7 @@ function handleWebRTCOffer(msg) {
     ? { iceServers: ICE_SERVERS, iceTransportPolicy: 'relay' }
     : { iceServers: STUN_SERVERS };
   _lastOfferUseTURN = useTurn;
-  console.log('[Receiver] 创建连接 useTURN=' + useTurn);
+  logToServer('创建连接 useTURN=' + useTurn, 'webrtc');
   p2pPC = new RTCPeerConnection(pcConfig);
 
   p2pPC.ontrack = (e) => {

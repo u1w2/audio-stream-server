@@ -23,12 +23,17 @@ alwaysApply: true
 
 ## 线上日志与验证
 
-Sender 通过 WebSocket 发送 `sender-log`，服务端 `server.js` 打印为 `[SenderLog]` 到 **Node stdout**（PM2/systemd 日志或 SSH 查看）。
+客户端通过 WebSocket 发送 `client-log`（sender/receiver 的 `logToServer`），服务端写入内存 ring buffer 与 `logs/debug.log`，并记录信令 `signal`、房间 `server` 事件。
 
-调试时可：
+### 下载 / 查询（公网经 Nginx 到 30001）
 
-1. 在 sender/receiver 关键路径调用已有 `logToServer(...)`（sender）或 `console.log`（receiver 浏览器控制台）
-2. SSH 到服务器查看 30001 进程日志，对照 `[SenderLog]` 与 `[Room]` 行
-3. 访问 `https://www.u1w2.com/api/status` 查看房间/连接在线状态
+| 用途 | URL |
+|------|-----|
+| JSON 查询最近日志 | `https://www.u1w2.com/api/debug/logs?limit=500&room=ABCDE` |
+| 下载 NDJSON 文件 | `https://www.u1w2.com/api/debug/logs/download` |
+| 按角色过滤 | `?role=sender` / `?role=receiver` / `?role=signal` |
+| 按埋点 tag | `?tag=ice` / `?tag=webrtc` / `?tag=media` / `?tag=version` |
 
-必要时可新增只读日志 API 或短期 debug 文件落盘，便于下载验证；实现前先确认 Nginx 路由与安全边界。
+若服务器设置了环境变量 **`DEBUG_LOG_TOKEN`**，上述 URL 需加 `&token=你的token`。
+
+调试多次仍无法定位问题时，在 sender/receiver 关键路径增加 `logToServer('...', 'tag')`，复现后下载日志分析。也可访问 `https://www.u1w2.com/api/status` 查看房间在线状态。

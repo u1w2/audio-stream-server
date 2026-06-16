@@ -3,6 +3,12 @@ const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const QRCode = require('qrcode');
+const {
+  appendDebugLog,
+  queryLogs,
+  readLogFileTail,
+  checkDebugToken,
+} = require('./lib/debug-log');
 
 const PORT = process.env.PORT || 3000;
 const DEFAULT_IP = '192.168.1.151';
@@ -40,6 +46,53 @@ const server = http.createServer((req, res) => {
       total: totalSenders + totalReceivers,
       list: roomsList,
     }));
+    return;
+  }
+
+  const query = new URL(req.url, `http://${req.headers.host}`).searchParams;
+
+  // 调试日志：JSON 查询
+  if (pathname === '/api/debug/logs') {
+    if (!checkDebugToken(query.get('token'))) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: '需要有效 token（环境变量 DEBUG_LOG_TOKEN）' }));
+      return;
+    }
+    const logs = queryLogs({
+      limit: query.get('limit'),
+      role: query.get('role'),
+      room: query.get('room'),
+      since: query.get('since'),
+      tag: query.get('tag'),
+    });
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-cache',
+    });
+    res.end(JSON.stringify({
+      count: logs.length,
+      logs,
+      hint: '下载完整文件: /api/debug/logs/download',
+    }));
+    return;
+  }
+
+  // 调试日志：文本下载（NDJSON，每行一条 JSON）
+  if (pathname === '/api/debug/logs/download') {
+    if (!checkDebugToken(query.get('token'))) {
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('403 Forbidden: invalid or missing token');
+      return;
+    }
+    const body = readLogFileTail();
+    const filename = `audio-stream-debug-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.log`;
+    res.writeHead(200, {
+      'Content-Type': 'application/x-ndjson; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`,
+      'Cache-Control': 'no-cache',
+    });
+    res.end(body || '');
     return;
   }
 
@@ -117,6 +170,9 @@ wss.on('connection', (ws) => {
         const qrDataUrl = await generateQRDataURL(receiverUrl);
 
         ws.send(JSON.stringify({ type: 'created', code, qrDataUrl, receiverUrl }));
+        ws._role = 'sender';
+        ws._room = code;
+        appendDebugLog('server', `Room created ${code}`, { room: code, host: msg.host });
         console.log(`[Room] Created: ${code}`);
         break;
       }
@@ -156,6 +212,9 @@ wss.on('connection', (ws) => {
               qrDataUrl,
               joinUrl,
             }));
+            ws._role = 'receiver';
+            ws._room = code;
+            appendDebugLog('server', 'Receiver re-joined (same ws)', { room: code, receiverId: ws._receiverId });
             break;
           }
         }
@@ -169,6 +228,8 @@ wss.on('connection', (ws) => {
         const receiverId = 'dev-' + room.receiverCount + '-' + Date.now().toString(36);
         room.receivers.push(ws);
         ws._receiverId = receiverId;
+        ws._role = 'receiver';
+        ws._room = code;
         currentRoom = code;
         currentRole = 'receiver';
         const count = room.receivers.length;
@@ -180,6 +241,7 @@ wss.on('connection', (ws) => {
 
         ws.send(JSON.stringify({ type: 'joined', code, receiverId, qrDataUrl, joinUrl }));
         room.sender?.send(JSON.stringify({ type: 'peer-ready', connections: count, receiverId }));
+        appendDebugLog('server', `Receiver joined ${code}`, { room: code, receiverId, count });
         console.log(`[Room] Joined: ${code} (receiverId: ${receiverId}, total: ${count})`);
         break;
       }
@@ -219,8 +281,16 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      case 'sender-log': {
-        console.log(`[SenderLog] ${ws._role || '?'} ${msg.text}`);
+      case 'sender-log':
+      case 'client-log': {
+        const role = msg.role || ws._role || (msg.type === 'sender-log' ? 'sender' : 'client');
+        const text = msg.text || '';
+        appendDebugLog(role, text, {
+          room: currentRoom || ws._room,
+          receiverId: ws._receiverId || msg.receiverId,
+          tag: msg.tag || '',
+        });
+        console.log(`[${role}] ${text}`);
         break;
       }
       case 'webrtc-offer':
@@ -237,6 +307,14 @@ wss.on('connection', (ws) => {
       case 'connection-lost': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
+        appendDebugLog('signal', msg.type, {
+          room: currentRoom,
+          from: currentRole,
+          targetReceiverId: msg.targetReceiverId || '',
+          receiverId: msg.receiverId || ws._receiverId || '',
+          useTURN: !!msg.useTURN,
+          iceRestart: !!msg.iceRestart,
+        });
         console.log(`[Signal] ${msg.type} from ${currentRole} room=${currentRoom} targetId=${msg.targetReceiverId||''} recvId=${msg.receiverId||''}`);
 
         if (msg.targetReceiverId && room.receivers) {
@@ -267,6 +345,7 @@ wss.on('connection', (ws) => {
           try { r.send(JSON.stringify({ type: 'peer-disconnected' })); } catch(_) {}
         });
         delete rooms[currentRoom];
+        appendDebugLog('server', 'Room deleted (sender left)', { room: currentRoom });
         console.log(`[Room] Deleted (sender left): ${currentRoom}`);
       } else if (currentRole === 'receiver') {
         const idx = room.receivers.indexOf(ws);
@@ -276,6 +355,7 @@ wss.on('connection', (ws) => {
         if (room.sender && room.sender.readyState === 1) {
           room.sender.send(JSON.stringify({ type: 'peer-left', connections: count, receiverId: realReceiverId }));
         }
+        appendDebugLog('server', 'Receiver left', { room: currentRoom, receiverId: realReceiverId, remaining: count });
         console.log(`[Room] Receiver left: ${currentRoom} (${realReceiverId}, remaining: ${count})`);
       }
     }
