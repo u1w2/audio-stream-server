@@ -152,6 +152,13 @@ function setTurnUI(on) {
   }
 }
 
+function notifyNetworkChanged() {
+  if (!roomCode || !myReceiverId) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'network-changed', receiverId: myReceiverId }));
+  }
+}
+
 function notifyConnectionLost() {
   if (_reconnecting || probePC || turnProbePC) return;
   if (ws && ws.readyState === 1) {
@@ -273,11 +280,9 @@ function startMediaWatchdog() {
       }
       silentChecks++;
       if (silentChecks >= 4) {
-        document.getElementById('playHint').textContent = 'P2P 无声音，切换 TURN...';
-        setStatus('buffering', '切换 TURN...');
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'p2p-no-media', receiverId: myReceiverId }));
-        }
+        document.getElementById('playHint').textContent = 'P2P 无声音，重连中...';
+        setStatus('buffering', '重连中...');
+        notifyNetworkChanged();
         return;
       }
     } catch (_) {}
@@ -346,6 +351,8 @@ function bindReceiverIceHandlers(pc, useTurn) {
 window.addEventListener('online', () => {
   if (roomCode && (!ws || ws.readyState !== WebSocket.OPEN)) {
     scheduleWsReconnect();
+  } else if (roomCode && ws && ws.readyState === WebSocket.OPEN && !_onTurn) {
+    notifyNetworkChanged();
   }
 });
 
@@ -586,6 +593,12 @@ function handleSignaling(msg) {
       if (msg.qrDataUrl) {
         document.getElementById('qrImage').src = msg.qrDataUrl;
       }
+      if (navigator.connection && !window._netChangeBound) {
+        window._netChangeBound = true;
+        navigator.connection.addEventListener('change', () => {
+          if (roomCode && myReceiverId) notifyNetworkChanged();
+        });
+      }
       break;
     }
 
@@ -627,7 +640,16 @@ function handleSignaling(msg) {
       break;
 
     case 'reconnect-p2p':
-      console.log('[Receiver] 收到 reconnect-p2p（兼容），忽略');
+      console.log('[Receiver] sender 请求 P2P 重连');
+      _reconnecting = true;
+      stopMediaWatchdog();
+      cleanupProbePC();
+      cleanupTurnProbePC();
+      closePCIntentionally();
+      _lastOfferUseTURN = false;
+      isPlaying = false;
+      document.getElementById('playHint').textContent = '网络切换，重连中...';
+      setStatus('buffering', '重连中...');
       break;
 
     case 'reconnect-relay':
@@ -695,6 +717,8 @@ function handleWebRTCOffer(msg) {
     closePCIntentionally();
     isPlaying = false;
   }
+
+  _reconnecting = false;
 
   const useTurn = !!msg.useTURN;
   const pcConfig = useTurn
