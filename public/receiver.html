@@ -96,6 +96,7 @@
     </div>
     <p style="color:#666; font-size:12px;" id="playHint">连接中...</p>
     <audio id="p2pAudio" autoplay style="display:none;"></audio>
+    <audio id="p2pDirect" autoplay style="display:none;"></audio>
     <div id="relayDebug" style="margin-top:8px; padding:6px 8px; background:rgba(0,0,0,0.3); border-radius:6px; font-size:10px; color:#888; font-family:monospace; text-align:left; max-height:80px; overflow-y:auto; display:none;"></div>
     <div id="bitrateControl" class="hidden" style="margin-top:16px; padding-top:12px; border-top:1px solid rgba(255,255,255,0.06);">
       <label style="font-size:12px; color:#888; display:block; margin-bottom:6px;">音质</label>
@@ -167,6 +168,7 @@ function initRelayPlayback() {
     const audioEl = document.getElementById('p2pAudio');
     _relayMsUrl = URL.createObjectURL(relayMediaSource);
     audioEl.src = _relayMsUrl;
+    audioEl.play().catch(() => {});
     relayDebug('MediaSource created, waiting sourceopen');
     relayMediaSource.addEventListener('sourceopen', () => {
       relayDebug('sourceopen fired, queued='+relayDataQueue.length);
@@ -239,13 +241,19 @@ function cleanupRelaySource() {
   relayDataQueue = [];
 }
 
-// Restore MediaSource as audio source after P2P took over
+// Restore MediaSource as audio source after P2P took over.
+// Instead of destroying/recreating, we use separate audio elements:
+// - #p2pAudio (hidden) = MediaSource relay
+// - #p2pDirect (hidden) = WebRTC P2P srcObject
+// Only one is audible at a time via volume toggling.
 function restoreRelaySource() {
-  const audioEl = document.getElementById('p2pAudio');
-  if (audioEl.srcObject) audioEl.srcObject = null;
-  if (_relayMsUrl && relayMediaSource) {
-    audioEl.src = _relayMsUrl;
-  }
+  // Mute P2P, unmute relay
+  const p2pEl = document.getElementById('p2pDirect');
+  if (p2pEl) { p2pEl.muted = true; p2pEl.volume = 0; }
+  const relayEl = document.getElementById('p2pAudio');
+  relayEl.muted = false;
+  relayEl.volume = 1;
+  relayEl.play().catch(() => {});
 }
 
 // --- Initialize UI based on URL params ---
@@ -764,12 +772,17 @@ function startPlayback() {
   // P2P 模式显示音质选择
   document.getElementById('bitrateControl').classList.remove('hidden');
 
-  const audioEl = document.getElementById('p2pAudio');
-  audioEl.srcObject = p2pRemoteStream;
-  // 移动端 autoplay 限制：用 AudioContext 创建 GainNode 连接 audio 元素
-  // 但 createMediaElementSource 只能调用一次，所以直接用 play() + 重试
+  // Use separate audio element for P2P — NEVER touch #p2pAudio (relay's MediaSource)
+  const p2pEl = document.getElementById('p2pDirect');
+  p2pEl.srcObject = p2pRemoteStream;
+  // Mute relay, unmute P2P
+  const relayEl = document.getElementById('p2pAudio');
+  relayEl.muted = true;
+  relayEl.volume = 0;
+  p2pEl.muted = false;
+  p2pEl.volume = 1;
   const doPlay = () => {
-    const p = audioEl.play();
+    const p = p2pEl.play();
     if (p) p.catch(() => { setTimeout(doPlay, 300); });
   };
   doPlay();
@@ -780,7 +793,11 @@ function startPlayback() {
 }
 
 function stopPlayback() {
-  const audioEl = document.getElementById('p2pAudio');
+  // Clean up both relay and P2P audio
+  const relayEl = document.getElementById('p2pAudio');
+  relayEl.muted = false; relayEl.volume = 1;
+  const p2pEl = document.getElementById('p2pDirect');
+  if (p2pEl.srcObject) p2pEl.srcObject = null;
   // 清理中继
   relayMode = false;
   clearRelayP2PCheck();
