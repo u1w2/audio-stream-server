@@ -264,8 +264,25 @@ wss.on('connection', (ws) => {
         break;
       }
 
-      case 'leave':
+      case 'leave': {
+        if (currentRole !== 'receiver' || !currentRoom || !rooms[currentRoom]) break;
+        const room = rooms[currentRoom];
+        const idx = room.receivers.indexOf(ws);
+        if (idx !== -1) room.receivers.splice(idx, 1);
+        const count = room.receivers.length;
+        const receiverId = ws._receiverId;
+        if (room.sender && room.sender.readyState === 1) {
+          room.sender.send(JSON.stringify({ type: 'peer-left', connections: count, receiverId }));
+        }
+        appendDebugLog('server', 'Receiver leave (explicit)', {
+          room: currentRoom,
+          receiverId,
+          remaining: count,
+        });
+        currentRoom = null;
+        currentRole = null;
         break;
+      }
 
       case 'bitrate-change': {
         // receiver → sender: 请求改变编码码率

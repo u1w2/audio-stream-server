@@ -149,6 +149,15 @@ function logToServer(text, tag) {
   console.log('[Receiver] ' + text);
 }
 
+function sendLeave() {
+  if (ws && ws.readyState === WebSocket.OPEN && roomCode) {
+    try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
+  }
+}
+
+window.addEventListener('pagehide', sendLeave);
+window.addEventListener('beforeunload', sendLeave);
+
 // Store code from URL
 let pendingCode = null;
 let _receiverDisconnectTimer = null;
@@ -606,7 +615,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.4-debug-log joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.5-stale-receiver-cleanup joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();

@@ -199,10 +199,12 @@ function handlePeerLost(deviceId, pc) {
 function bindIceHandlers(deviceId, pc, useTURN) {
   pc.oniceconnectionstatechange = () => {
     const ice = pc.iceConnectionState;
-    logToServer('ice=' + ice + ' useTURN=' + useTURN, 'ice');
+    logToServer('ice=' + ice + ' useTURN=' + useTURN + ' device=' + deviceId, 'ice');
 
     if (ice === 'connected' || ice === 'completed') {
       clearDisconnectTimer(deviceId);
+      clearConnectWatchdog(deviceId);
+      clearIceRestartAnswerTimeout(deviceId);
       clearP2pMediaVerifyTimer(deviceId);
       if (useTURN) {
         cleanupTurnProbeConnection(deviceId);
@@ -326,7 +328,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.4-debug-log 已加载', 'version');
+    logToServer('【版本】V6.5-stale-receiver-cleanup 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -391,6 +393,8 @@ function handleSignaling(msg) {
     case 'webrtc-answer': {
       const pc = resolvePC(msg.receiverId, msg.isProbe, msg.isTurnProbe);
       if (pc) {
+        clearIceRestartAnswerTimeout(msg.receiverId);
+        clearConnectWatchdog(msg.receiverId);
         pc.setRemoteDescription(new RTCSessionDescription(msg.sdp)).catch(() => {});
       }
       break;
@@ -624,6 +628,7 @@ function startP2P(deviceId) {
       }));
     }
     scheduleConnectWatchdog(deviceId);
+    scheduleOfferAnswerTimeout(deviceId);
   }).catch(() => cleanupPeerConnection(deviceId));
 }
 
@@ -642,6 +647,50 @@ let _p2pRestartCount = {};
 let _iceRestartCount = {};
 let p2pFailoverTimers = {};
 let connectWatchdogTimers = {};
+let iceRestartAnswerTimers = {};
+
+function clearIceRestartAnswerTimeout(deviceId) {
+  if (iceRestartAnswerTimers[deviceId]) {
+    clearTimeout(iceRestartAnswerTimers[deviceId]);
+    delete iceRestartAnswerTimers[deviceId];
+  }
+}
+
+function scheduleIceRestartAnswerTimeout(deviceId) {
+  scheduleOfferAnswerTimeout(deviceId);
+}
+
+function scheduleOfferAnswerTimeout(deviceId) {
+  clearIceRestartAnswerTimeout(deviceId);
+  iceRestartAnswerTimers[deviceId] = setTimeout(() => {
+    delete iceRestartAnswerTimers[deviceId];
+    const pc = peerConnections[deviceId];
+    if (!pc || pc._p2pVerified) return;
+    const ice = pc.iceConnectionState;
+    if (ice === 'connected' || ice === 'completed') return;
+    logToServer('offer 无 answer，移除僵尸设备 deviceId=' + deviceId, 'stale');
+    removeStaleReceiver(deviceId);
+  }, 8000);
+}
+
+function removeStaleReceiver(deviceId) {
+  clearConnectWatchdog(deviceId);
+  clearP2PFailoverTimer(deviceId);
+  clearIceRestartAnswerTimeout(deviceId);
+  clearP2pMediaVerifyTimer(deviceId);
+  cleanupTurnProbeConnection(deviceId);
+  cleanupProbeConnection(deviceId);
+  cleanupPeerConnection(deviceId, true);
+  delete deviceList[deviceId];
+  delete _iceRestartCount[deviceId];
+  delete _p2pRestartCount[deviceId];
+  delete _p2pRestarting[deviceId];
+  updateDeviceList();
+  if (Object.keys(deviceList).length === 0) {
+    document.getElementById('btnStop').classList.add('hidden');
+    setStatus('connected', '无设备连接，等待扫码...');
+  }
+}
 
 function clearConnectWatchdog(deviceId) {
   if (connectWatchdogTimers[deviceId]) {
@@ -652,15 +701,18 @@ function clearConnectWatchdog(deviceId) {
 
 function scheduleConnectWatchdog(deviceId) {
   clearConnectWatchdog(deviceId);
+  const pc = peerConnections[deviceId];
+  const delay = pc && pc._p2pVerified ? 8000 : 15000;
   connectWatchdogTimers[deviceId] = setTimeout(() => {
     delete connectWatchdogTimers[deviceId];
-    const pc = peerConnections[deviceId];
-    if (!pc || pc._useTURN || pc._p2pVerified) return;
-    const ice = pc.iceConnectionState;
+    const activePc = peerConnections[deviceId];
+    if (!activePc || activePc._useTURN || activePc._p2pVerified) return;
+    if (_p2pRestarting[deviceId] || iceRestartAnswerTimers[deviceId]) return;
+    const ice = activePc.iceConnectionState;
     if (ice === 'connected' || ice === 'completed') return;
-    logToServer('P2P 连接超时，ICE restart deviceId=' + deviceId);
+    logToServer('P2P 连接超时(' + delay + 'ms)，ICE restart deviceId=' + deviceId, 'watchdog');
     restartIceP2P(deviceId);
-  }, 6000);
+  }, delay);
 }
 
 function clearP2PFailoverTimer(deviceId) {
@@ -718,6 +770,7 @@ async function restartIceP2P(deviceId) {
         sdp: pc.localDescription.toJSON(),
       }));
     }
+    scheduleIceRestartAnswerTimeout(deviceId);
     verifyMainP2PMedia(deviceId, pc);
     scheduleP2PFailoverToTurn(deviceId);
     scheduleConnectWatchdog(deviceId);
@@ -745,6 +798,7 @@ function restartP2P(deviceId) {
   }
 
   _p2pRestarting[deviceId] = true;
+  _iceRestartCount[deviceId] = 0;
   logToServer('P2P 重连 deviceId=' + deviceId + ' 第' + _p2pRestartCount[deviceId] + '次');
 
   clearP2pMediaVerifyTimer(deviceId);
@@ -758,6 +812,7 @@ function restartP2P(deviceId) {
 
   startP2P(deviceId);
   scheduleP2PFailoverToTurn(deviceId);
+  scheduleOfferAnswerTimeout(deviceId);
 
   setTimeout(() => { delete _p2pRestarting[deviceId]; }, 5000);
 }
@@ -1202,6 +1257,7 @@ function migrateDeviceId(oldId, newId) {
   rekeyDeviceMap(_iceRestartCount, oldId, newId);
   rekeyDeviceMap(p2pFailoverTimers, oldId, newId);
   rekeyDeviceMap(connectWatchdogTimers, oldId, newId);
+  rekeyDeviceMap(iceRestartAnswerTimers, oldId, newId);
 }
 
 function registerDevice(devId, serverCount) {
@@ -1239,6 +1295,7 @@ function registerDevice(devId, serverCount) {
 function cleanupPeerConnection(deviceId, intentional) {
   clearDisconnectTimer(deviceId);
   clearConnectWatchdog(deviceId);
+  clearIceRestartAnswerTimeout(deviceId);
   clearP2pMediaVerifyTimer(deviceId);
   const pc = peerConnections[deviceId];
   if (pc) {
