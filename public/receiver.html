@@ -176,6 +176,10 @@ function setTurnUI(on) {
 
 function notifyNetworkChanged() {
   if (!roomCode || !myReceiverId) return;
+  if (isReceiverIceRestarting()) {
+    logToServer('ICE restart 协商中，跳过 network-changed', 'network');
+    return;
+  }
   if (_networkChangeTimer) clearTimeout(_networkChangeTimer);
   _networkChangeTimer = setTimeout(() => {
     _networkChangeTimer = null;
@@ -188,6 +192,11 @@ function notifyNetworkChanged() {
 let _networkChangeTimer = null;
 let _roomBroadcast = null;
 let _suppressConnectionLostUntil = 0;
+let _receiverIceRestartUntil = 0;
+
+function isReceiverIceRestarting() {
+  return _receiverIceRestartUntil > Date.now();
+}
 
 function suppressConnectionLost(ms) {
   _suppressConnectionLostUntil = Math.max(_suppressConnectionLostUntil, Date.now() + ms);
@@ -216,6 +225,10 @@ function setupRoomBroadcast(code) {
 
 function notifyConnectionLost() {
   if (Date.now() < _suppressConnectionLostUntil) return;
+  if (isReceiverIceRestarting()) {
+    logToServer('ICE restart 协商中，跳过 connection-lost', 'network');
+    return;
+  }
   if (_reconnecting || probePC || turnProbePC) return;
   const turnPath = _onTurn || _lastOfferUseTURN;
   if (p2pPC && p2pPC._createdAt && Date.now() - p2pPC._createdAt < 12000 && turnPath) {
@@ -392,6 +405,21 @@ function clearReceiverDisconnectTimer() {
   }
 }
 
+function resumePlaybackAfterReconnect() {
+  if (_onTurn || turnProbePC) return;
+  if (!p2pRemoteStream && p2pPC) {
+    const receivers = p2pPC.getReceivers().filter(r => r.track && r.track.kind === 'audio');
+    if (receivers.length) {
+      p2pRemoteStream = new MediaStream(receivers.map(r => r.track));
+      logToServer('ICE restart 后从 getReceivers 恢复音频流', 'media');
+    }
+  }
+  if (!p2pRemoteStream) return;
+  startPlayback(false);
+  document.getElementById('playHint').textContent = '';
+  setStatus('playing', '播放中');
+}
+
 function bindReceiverIceHandlers(pc, useTurn) {
   pc.oniceconnectionstatechange = () => {
     if (pc._intentionalClose) return;
@@ -402,15 +430,22 @@ function bindReceiverIceHandlers(pc, useTurn) {
     if (ice === 'connected' || ice === 'completed') {
       clearReceiverDisconnectTimer();
       _reconnecting = false;
+      _receiverIceRestartUntil = 0;
       const isTurn = turnPath;
       setTurnUI(isTurn);
       if (!isTurn) {
         detectRelayMode();
-        if (p2pRemoteStream) startPlayback(false);
+        resumePlaybackAfterReconnect();
       }
     } else if (ice === 'failed') {
       clearReceiverDisconnectTimer();
       _reconnecting = false;
+      if (isReceiverIceRestarting()) {
+        logToServer('ICE restart 协商 failed，等待 sender 重连', 'network');
+        document.getElementById('playHint').textContent = '网络切换，重连中...';
+        setStatus('buffering', '重连中...');
+        return;
+      }
       if (!turnPath && !turnProbePC) {
         logToServer('ice failed，通知 network-changed', 'network');
         notifyNetworkChanged();
@@ -421,6 +456,10 @@ function bindReceiverIceHandlers(pc, useTurn) {
       document.getElementById('playHint').textContent = '连接断开，等待重连...';
       setStatus('buffering', '重连中...');
     } else if (ice === 'disconnected') {
+      if (isReceiverIceRestarting()) {
+        logToServer('ICE restart 协商 disconnected，等待恢复', 'network');
+        return;
+      }
       if (!turnPath && !turnProbePC) {
         logToServer('ice disconnected，通知 network-changed', 'network');
         notifyNetworkChanged();
@@ -435,6 +474,7 @@ function bindReceiverIceHandlers(pc, useTurn) {
           logToServer('TURN 协商 disconnected（瞬态），不发 connection-lost', 'network');
           return;
         }
+        if (isReceiverIceRestarting()) return;
         _reconnecting = false;
         notifyConnectionLost();
         document.getElementById('playHint').textContent = '连接断开，等待重连...';
@@ -449,6 +489,7 @@ function bindReceiverIceHandlers(pc, useTurn) {
       clearReceiverDisconnectTimer();
       const turnPath = !!(useTurn || _lastOfferUseTURN || _onTurn);
       if (turnPath && pc._createdAt && Date.now() - pc._createdAt < 12000) return;
+      if (isReceiverIceRestarting()) return;
       notifyConnectionLost();
     }
   };
@@ -694,7 +735,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.11-turn-ice-stats joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.12-wifi-return joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
@@ -859,6 +900,8 @@ function handleWebRTCOffer(msg) {
   if (msg.iceRestart && p2pPC && !useTurn && !_lastOfferUseTURN) {
     _reconnecting = false;
     _lastOfferUseTURN = false;
+    _receiverIceRestartUntil = Date.now() + 12000;
+    suppressConnectionLost(12000);
     logToServer('ICE restart 重协商', 'webrtc');
     document.getElementById('playHint').textContent = '网络切换，重连中...';
     setStatus('buffering', '重连中...');
