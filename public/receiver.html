@@ -169,7 +169,7 @@ function initRelayPlayback() {
     audioEl.src = _relayMsUrl;
     relayDebug('MediaSource created, waiting sourceopen');
     relayMediaSource.addEventListener('sourceopen', () => {
-      relayDebug('sourceopen fired');
+      relayDebug('sourceopen fired, queued='+relayDataQueue.length);
       try {
         relaySourceBuffer = relayMediaSource.addSourceBuffer('audio/webm;codecs=opus');
         relaySourceBuffer.mode = 'sequence';
@@ -177,7 +177,7 @@ function initRelayPlayback() {
           // Flush queued data after each append
           if (relayDataQueue.length > 0) {
             const next = relayDataQueue.shift();
-            try { relaySourceBuffer.appendBuffer(next); } catch(_) {}
+            try { relaySourceBuffer.appendBuffer(next); relayDebug('flush OK, q='+relayDataQueue.length); } catch(_) {}
           }
         });
         // Flush initial queue
@@ -208,13 +208,20 @@ function appendRelayData(buf) {
   if (relaySourceBuffer && !relaySourceBuffer.updating) {
     try {
       relaySourceBuffer.appendBuffer(buf);
-      return;
-    } catch(_) {}
+      relayDebug('append OK, buf='+buf.byteLength+'b');
+    } catch(e) {
+      relayDebug('append err: '+e.message);
+      relayDataQueue.push(buf);
+    }
+  } else {
+    relayDataQueue.push(buf);
+    relayDebug('queued, q='+relayDataQueue.length);
   }
-  relayDataQueue.push(buf);
   if (!relayMode) relayMode = true;
   const audioEl = document.getElementById('p2pAudio');
-  if (audioEl.paused) audioEl.play().catch(() => {});
+  if (audioEl.paused) {
+    audioEl.play().then(() => relayDebug('play OK')).catch(e => relayDebug('play FAIL: '+e.name));
+  }
 }
 
 // Clean up relay MediaSource
