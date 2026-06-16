@@ -156,27 +156,41 @@ function initRelayPlayback() {
 }
 
 function appendRelayData(buf) {
+  const wasEmpty = relayDataChunks.length === 0;
   relayDataChunks.push(buf);
   if (!relayBlobPlaying) {
+    console.log('[Relay] appendRelayData: triggering playRelayChunk, wasEmpty:', wasEmpty, 'now total chunks:', relayDataChunks.length);
     playRelayChunk();
   }
 }
 
 function playRelayChunk() {
+  console.log('[Relay] playRelayChunk called, chunks:', relayDataChunks.length, 'blobPlaying:', relayBlobPlaying);
   if (relayDataChunks.length === 0) {
     relayBlobPlaying = false;
     return;
   }
   relayBlobPlaying = true;
   const chunks = relayDataChunks.splice(0);
+  console.log('[Relay] Creating Blob from', chunks.length, 'chunks, total bytes:', chunks.reduce((s,c) => s + c.byteLength, 0));
   const blob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
   const url = URL.createObjectURL(blob);
   const audioEl = document.getElementById('p2pAudio');
-  // 释放旧 URL
+  console.log('[Relay] Audio element: paused=', audioEl.paused, 'srcObject=', !!audioEl.srcObject, 'src=', typeof audioEl.src);
   if (audioEl._relayBlobUrl) URL.revokeObjectURL(audioEl._relayBlobUrl);
   audioEl._relayBlobUrl = url;
+  // Clear srcObject before setting src (some browsers need this)
+  if (audioEl.srcObject) { audioEl.srcObject = null; }
   audioEl.src = url;
-  audioEl.play().catch(() => {});
+  audioEl.load();
+  const playPromise = audioEl.play();
+  if (playPromise) {
+    playPromise.then(() => {
+      console.log('[Relay] play() succeeded');
+    }).catch(err => {
+      console.log('[Relay] play() failed:', err.name, err.message);
+    });
+  }
   // 当前段播完后自动切到下一段（用 timeupdate 检测即将结束）
   audioEl.onended = () => {
     playRelayChunk();
