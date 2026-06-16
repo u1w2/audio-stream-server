@@ -134,6 +134,22 @@ let relayBlobTimer = null;   // 定时器
 let relayBlobPlaying = false;
 let relayMode = false;
 
+// receiver侧定时请求sender尝试P2P
+let _relayP2PCheckTimer = null;
+function startRelayP2PCheck() {
+  if (_relayP2PCheckTimer) return;
+  _relayP2PCheckTimer = setInterval(() => {
+    if (!relayMode) { clearRelayP2PCheck(); return; }
+    if (ws && ws.readyState === 1) {
+      console.log('[Receiver] 中继模式，请求sender尝试P2P');
+      ws.send(JSON.stringify({ type: 'p2p-check', receiverId: myReceiverId }));
+    }
+  }, 15000);
+}
+function clearRelayP2PCheck() {
+  if (_relayP2PCheckTimer) { clearInterval(_relayP2PCheckTimer); _relayP2PCheckTimer = null; }
+}
+
 function initRelayPlayback() {
   // 不需要初始化——Blob 播放不需要 MediaSource
   console.log('[Relay] Blob播放模式');
@@ -469,6 +485,7 @@ function handleSignaling(msg) {
           if (p2pPC) { p2pPC.close(); p2pPC = null; pendingCandidates = []; }
           isPlaying = false; // 重置，避免 startPlayback 误设
           relayMode = true;
+          startRelayP2PCheck();
           document.getElementById('bitrateControl').classList.add('hidden');
           document.getElementById('playHint').textContent = '中继模式（16kbps保底）';
           setStatus('playing', '中继播放 📡');
@@ -537,7 +554,7 @@ function handleSignaling(msg) {
       // TURN 中继模式隐藏音质选择
       document.getElementById('bitrateControl').classList.add('hidden');
       relayMode = true;
-      document.getElementById('bitrateControl').classList.add('hidden');
+      startRelayP2PCheck();
       document.getElementById('playHint').textContent = '中继模式（16kbps保底）';
       setStatus('playing', '中继播放 📡');
       isPlaying = true;
@@ -692,6 +709,7 @@ function startPlayback() {
 
   // P2P 实际连通，关闭中继保底，恢复音质控件
   relayMode = false;
+  clearRelayP2PCheck();
   // 清除 P2P 超时保护
   if (window._p2pTimeout) { clearTimeout(window._p2pTimeout); window._p2pTimeout = null; }
 

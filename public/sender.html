@@ -427,6 +427,14 @@ function handleSignaling(msg) {
       break;
     }
 
+    case 'p2p-check':
+      // receiver 在中继模式下请求 sender 尝试 P2P
+      if (_relayDetectedSender && msg.receiverId) {
+        console.log('[Sender] receiver请求P2P尝试:', msg.receiverId);
+        tryReconnectP2P(msg.receiverId);
+      }
+      break;
+
     case 'error':
       alert(msg.message);
       break;
@@ -505,11 +513,11 @@ function createPC(deviceId, useTURN) {
           clearTimeout(p2pStableTimers[deviceId]);
           delete p2pStableTimers[deviceId];
         }
-        // 15秒后如果连接仍稳定，关闭中继保底，通知 receiver，标记 P2P 模式
+        // 5秒后如果连接仍稳定，关闭中继保底，通知 receiver，标记 P2P 模式
         p2pStableTimers[deviceId] = setTimeout(() => {
           const p = peerConnections[deviceId];
           if (p && (p.connectionState === 'connected' || p.connectionState === 'completed')) {
-            logToServer('P2P已稳定15秒，关闭中继保底，标记P2P模式');
+            logToServer('P2P已稳定5秒，关闭中继保底，标记P2P模式');
             _globalP2PActive = true;
             stopRelay();
             clearP2PRetry(deviceId);
@@ -660,14 +668,13 @@ function tryReconnectP2P(deviceId) {
   setTimeout(() => { delete _p2pRetrying[deviceId]; }, 8000);
 }
 
-// 中继模式下每30秒尝试切回 P2P
+// 中继模式下每10秒尝试切回 P2P，首次立即尝试
 let _relayRetryTimer = {};
 
 function startP2PRetry(deviceId) {
   clearP2PRetry(deviceId);
-  _relayRetryTimer[deviceId] = setInterval(() => {
+  const attempt = () => {
     logToServer('startP2PRetry: 尝试切回P2P deviceId=' + deviceId);
-    // 清理当前 PC 并发纯 STUN 探测，保持中继推流独立不受影响
     if (peerConnections[deviceId]) {
       cleanupPeerConnection(deviceId);
     }
@@ -675,7 +682,11 @@ function startP2PRetry(deviceId) {
       ws.send(JSON.stringify({ type: 'reconnect-p2p', targetReceiverId: deviceId }));
     }
     startP2P(deviceId, true);
-  }, 10000);
+  };
+  // 首次立即尝试
+  setTimeout(attempt, 0);
+  // 之后每10秒重试
+  _relayRetryTimer[deviceId] = setInterval(attempt, 10000);
 }
 
 function clearP2PRetry(deviceId) {
