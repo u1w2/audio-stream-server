@@ -694,7 +694,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.10-turn-grace joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.11-turn-ice-stats joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
@@ -841,6 +841,16 @@ function handleWebRTCOffer(msg) {
   }
 
   const useTurn = !!msg.useTURN;
+
+  if (useTurn && p2pPC && p2pPC._createdAt) {
+    const age = Date.now() - p2pPC._createdAt;
+    const ice = p2pPC.iceConnectionState;
+    if (age < 8000 && (ice === 'checking' || ice === 'new' || ice === 'connecting')) {
+      logToServer('忽略重复 TURN offer（协商中 age=' + age + 'ms ice=' + ice + '）', 'webrtc');
+      return;
+    }
+  }
+
   logToServer(
     '收到 offer useTURN=' + useTurn + ' iceRestart=' + !!msg.iceRestart + ' hasPC=' + !!p2pPC,
     'webrtc'

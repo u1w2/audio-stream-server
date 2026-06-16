@@ -185,6 +185,35 @@ function clearDisconnectTimer(deviceId) {
 
 let _turnRecreateTimer = {};
 let _turnTransitionUntil = {};
+let _turnRecreateBackoff = {};
+
+async function logTurnIceStats(deviceId, pc, label) {
+  try {
+    const stats = await pc.getStats();
+    let relay = 0;
+    let host = 0;
+    let srflx = 0;
+    stats.forEach(r => {
+      if (r.type === 'local-candidate') {
+        if (r.candidateType === 'relay') relay++;
+        else if (r.candidateType === 'host') host++;
+        else if (r.candidateType === 'srflx') srflx++;
+      }
+    });
+    logToServer(
+      label + ' candidates relay=' + relay + ' srflx=' + srflx + ' host=' + host +
+      ' ice=' + pc.iceConnectionState + ' conn=' + pc.connectionState,
+      'ice'
+    );
+  } catch (_) {}
+}
+
+function failTurnNegotiation(deviceId, pc, label) {
+  if (peerConnections[deviceId] !== pc) return;
+  logTurnIceStats(deviceId, pc, label);
+  cleanupPeerConnection(deviceId, true);
+  scheduleDirectTurnRecreate(deviceId);
+}
 
 function isTurnTransition(deviceId) {
   return (_turnTransitionUntil[deviceId] || 0) > Date.now();
@@ -204,6 +233,10 @@ function isTurnNegotiating(pc) {
 
 function scheduleDirectTurnRecreate(deviceId) {
   if (_turnRecreateTimer[deviceId]) return;
+  const attempt = (_turnRecreateBackoff[deviceId] || 0) + 1;
+  _turnRecreateBackoff[deviceId] = attempt;
+  const delay = Math.min(4000 * Math.pow(1.6, attempt - 1), 30000);
+  logToServer('TURN 重建调度 ' + Math.round(delay) + 'ms 后（第' + attempt + '次）device=' + deviceId, 'network');
   _turnRecreateTimer[deviceId] = setTimeout(() => {
     delete _turnRecreateTimer[deviceId];
     if (!deviceList[deviceId] || !localAudioTrack) return;
@@ -213,7 +246,7 @@ function scheduleDirectTurnRecreate(deviceId) {
     }
     if (active) cleanupPeerConnection(deviceId, true);
     createDirectTurn(deviceId);
-  }, 3500);
+  }, delay);
 }
 
 function clearTurnRecreateTimer(deviceId) {
@@ -266,8 +299,7 @@ function bindIceHandlers(deviceId, pc, useTURN) {
     } else if (ice === 'failed') {
       clearDisconnectTimer(deviceId);
       if (isTurnNegotiating(pc)) {
-        logToServer('TURN 协商 failed（瞬态），延迟重建 device=' + deviceId, 'ice');
-        scheduleDirectTurnRecreate(deviceId);
+        failTurnNegotiation(deviceId, pc, 'TURN 协商 failed（瞬态）');
         return;
       }
       handlePeerLost(deviceId, pc);
@@ -285,12 +317,18 @@ function bindIceHandlers(deviceId, pc, useTURN) {
     }
   };
 
+  pc.onicegatheringstatechange = () => {
+    if (pc.iceGatheringState === 'complete' && useTURN && peerConnections[deviceId] === pc) {
+      logTurnIceStats(deviceId, pc, 'TURN gathering complete');
+    }
+  };
+
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'failed' && peerConnections[deviceId] === pc) {
       clearDisconnectTimer(deviceId);
       if (isTurnNegotiating(pc)) {
-        logToServer('TURN connectionState failed（瞬态），延迟重建', 'ice');
-        scheduleDirectTurnRecreate(deviceId);
+        logTurnIceStats(deviceId, pc, 'TURN connectionState failed（瞬态）');
+        failTurnNegotiation(deviceId, pc, 'TURN connectionState failed（瞬态）');
         return;
       }
       handlePeerLost(deviceId, pc);
@@ -322,6 +360,7 @@ function notifyReceiverMode(deviceId, mode, bitrate) {
 
 function enterTurnMode(deviceId, pc) {
   delete _turnTransitionUntil[deviceId];
+  _turnRecreateBackoff[deviceId] = 0;
   _onTurnSender = true;
   selectedBitrate = TURN_BITRATE;
   applyBitrateToPC(pc, TURN_BITRATE);
@@ -388,7 +427,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.10-turn-grace 已加载', 'version');
+    logToServer('【版本】V6.11-turn-ice-stats 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -1406,6 +1445,7 @@ function migrateDeviceId(oldId, newId) {
   rekeyDeviceMap(iceRestartAnswerTimers, oldId, newId);
   rekeyDeviceMap(_turnRecreateTimer, oldId, newId);
   rekeyDeviceMap(_turnTransitionUntil, oldId, newId);
+  rekeyDeviceMap(_turnRecreateBackoff, oldId, newId);
   rekeyDeviceMap(_offerRetryCount, oldId, newId);
 }
 
