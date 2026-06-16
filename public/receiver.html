@@ -647,7 +647,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.6-fast-network-switch joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.7-receiver-recover joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
@@ -712,6 +712,21 @@ function handleSignaling(msg) {
       isPlaying = false;
       document.getElementById('playHint').textContent = '网络切换，重连中...';
       setStatus('buffering', '重连中...');
+      break;
+
+    case 'force-rejoin':
+      logToServer('sender 要求恢复会话 force-rejoin', 'recover');
+      stopMediaWatchdog();
+      cleanupProbePC();
+      cleanupTurnProbePC();
+      closePCIntentionally();
+      isPlaying = false;
+      _reconnecting = false;
+      document.getElementById('playHint').textContent = '重新连接...';
+      setStatus('buffering', '重连中...');
+      if (ws && ws.readyState === WebSocket.OPEN && roomCode) {
+        ws.send(JSON.stringify({ type: 'join', code: roomCode }));
+      }
       break;
 
     case 'reconnect-relay':

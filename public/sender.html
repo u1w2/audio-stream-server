@@ -328,12 +328,34 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.6-fast-network-switch 已加载', 'version');
+    logToServer('【版本】V6.7-receiver-recover 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
     document.getElementById('btnCreate').disabled = false;
   }
+}
+
+function recoverReceiver(deviceId) {
+  if (!deviceId || deviceList[deviceId]) return;
+  logToServer('恢复 receiver 登记 device=' + deviceId, 'recover');
+  registerDevice(deviceId, Object.keys(deviceList).length + 1);
+  updateDeviceList();
+  if (!isStreaming) {
+    isStreaming = true;
+    document.getElementById('btnStop').classList.remove('hidden');
+  }
+  const count = Object.keys(deviceList).length;
+  setStatus('streaming', '正在推流 🎵 (' + count + ' 个设备)');
+  if (localAudioTrack && !peerConnections[deviceId] && !probeConnections[deviceId] && !turnProbeConnections[deviceId]) {
+    startP2P(deviceId);
+  }
+}
+
+function ensureReceiver(deviceId) {
+  if (!deviceId) return false;
+  if (!deviceList[deviceId]) recoverReceiver(deviceId);
+  return !!deviceList[deviceId];
 }
 
 function handleSignaling(msg) {
@@ -391,6 +413,9 @@ function handleSignaling(msg) {
       break;
 
     case 'webrtc-answer': {
+      if (msg.receiverId && !msg.isProbe && !msg.isTurnProbe) {
+        ensureReceiver(msg.receiverId);
+      }
       const pc = resolvePC(msg.receiverId, msg.isProbe, msg.isTurnProbe);
       if (pc) {
         clearIceRestartAnswerTimeout(msg.receiverId);
@@ -462,20 +487,19 @@ function handleSignaling(msg) {
       break;
 
     case 'p2p-no-media':
-      if (msg.receiverId && deviceList[msg.receiverId]) {
-        logToServer('receiver 报告 P2P 无媒体，ICE restart');
-        restartIceP2P(msg.receiverId);
+      if (msg.receiverId && ensureReceiver(msg.receiverId)) {
+        handleNetworkChanged(msg.receiverId);
       }
       break;
 
     case 'network-changed':
-      if (msg.receiverId && deviceList[msg.receiverId]) {
+      if (msg.receiverId && ensureReceiver(msg.receiverId)) {
         handleNetworkChanged(msg.receiverId);
       }
       break;
 
     case 'connection-lost':
-      if (msg.receiverId && deviceList[msg.receiverId]) {
+      if (msg.receiverId && ensureReceiver(msg.receiverId)) {
         if (probeConnections[msg.receiverId]) {
           logToServer('忽略 connection-lost（P2P 并行探测中）');
           break;
@@ -488,8 +512,8 @@ function handleSignaling(msg) {
           logToServer('忽略 connection-lost（P2P 重连中）');
           break;
         }
-        logToServer('receiver 报告连接丢失，ICE restart');
-        restartIceP2P(msg.receiverId);
+        logToServer('receiver 报告连接丢失，ICE restart device=' + msg.receiverId, 'network');
+        handleNetworkChanged(msg.receiverId);
       }
       break;
 
@@ -673,6 +697,10 @@ function scheduleOfferAnswerTimeout(deviceId) {
 }
 
 function removeStaleReceiver(deviceId) {
+  logToServer('移除僵尸/超时设备 deviceId=' + deviceId, 'stale');
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'force-rejoin', targetReceiverId: deviceId }));
+  }
   clearConnectWatchdog(deviceId);
   clearP2PFailoverTimer(deviceId);
   clearIceRestartAnswerTimeout(deviceId);

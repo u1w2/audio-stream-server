@@ -214,6 +214,12 @@ wss.on('connection', (ws) => {
             }));
             ws._role = 'receiver';
             ws._room = code;
+            const rejoinCount = room.receivers.length;
+            room.sender?.send(JSON.stringify({
+              type: 'peer-ready',
+              connections: rejoinCount,
+              receiverId: ws._receiverId,
+            }));
             appendDebugLog('server', 'Receiver re-joined (same ws)', { room: code, receiverId: ws._receiverId });
             break;
           }
@@ -315,6 +321,7 @@ wss.on('connection', (ws) => {
       case 'webrtc-ice':
       case 'reconnect-p2p':
       case 'reconnect-relay':
+      case 'force-rejoin':
       case 'p2p-probe-start':
       case 'p2p-probe-commit':
       case 'turn-probe-start':
