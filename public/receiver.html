@@ -129,11 +129,12 @@ const ICE_SERVERS = [
 // Store code from URL
 let pendingCode = null;
 
-// 中继播放相关
-let relayDataChunks = [];    // 累积的中继数据（ArrayBuffer）
-let relayBlobTimer = null;   // 定时器
-let relayBlobPlaying = false;
+// 中继播放相关 (MediaSource-based streaming)
+let relayMediaSource = null;
+let relaySourceBuffer = null;
+let relayDataQueue = [];    // queue data before SourceBuffer is ready
 let relayMode = false;
+let _relayMsUrl = null;     // saved MediaSource object URL
 
 // receiver侧定时请求sender尝试P2P
 let _relayP2PCheckTimer = null;
@@ -159,59 +160,85 @@ function relayDebug(msg) {
   if (el.textContent.length > 2000) el.textContent = el.textContent.slice(0, 2000);
 }
 function initRelayPlayback() {
-  // 不需要初始化——Blob 播放不需要 MediaSource
-  console.log('[Relay] Blob播放模式');
+  // Create MediaSource during user gesture to ensure sourceopen fires on mobile
+  if (relayMediaSource) return;
+  try {
+    relayMediaSource = new MediaSource();
+    const audioEl = document.getElementById('p2pAudio');
+    _relayMsUrl = URL.createObjectURL(relayMediaSource);
+    audioEl.src = _relayMsUrl;
+    relayDebug('MediaSource created, waiting sourceopen');
+    relayMediaSource.addEventListener('sourceopen', () => {
+      relayDebug('sourceopen fired');
+      try {
+        relaySourceBuffer = relayMediaSource.addSourceBuffer('audio/webm;codecs=opus');
+        relaySourceBuffer.mode = 'sequence';
+        relaySourceBuffer.addEventListener('updateend', () => {
+          // Flush queued data after each append
+          if (relayDataQueue.length > 0) {
+            const next = relayDataQueue.shift();
+            try { relaySourceBuffer.appendBuffer(next); } catch(_) {}
+          }
+        });
+        // Flush initial queue
+        while (relayDataQueue.length > 0) {
+          const chunk = relayDataQueue.shift();
+          try {
+            if (!relaySourceBuffer.updating) {
+              relaySourceBuffer.appendBuffer(chunk);
+            } else {
+              relayDataQueue.unshift(chunk);
+              break;
+            }
+          } catch(_) {
+            relayDataQueue.unshift(chunk);
+            break;
+          }
+        }
+      } catch(e) {
+        relayDebug('sourceopen error: '+e.message);
+      }
+    });
+  } catch(e) {
+    relayDebug('MediaSource init fail: '+e.message);
+  }
 }
 
 function appendRelayData(buf) {
-  const wasEmpty = relayDataChunks.length === 0;
-  relayDataChunks.push(buf);
-  if (!relayBlobPlaying) {
-    relayDebug("appendRelayData"); console.log('[Relay] appendRelayData: triggering playRelayChunk, wasEmpty:', wasEmpty, 'now total chunks:', relayDataChunks.length);
-    playRelayChunk();
+  if (relaySourceBuffer && !relaySourceBuffer.updating) {
+    try {
+      relaySourceBuffer.appendBuffer(buf);
+      return;
+    } catch(_) {}
   }
+  relayDataQueue.push(buf);
+  if (!relayMode) relayMode = true;
+  const audioEl = document.getElementById('p2pAudio');
+  if (audioEl.paused) audioEl.play().catch(() => {});
 }
 
-function playRelayChunk() {
-  relayDebug("playRelayChunk chunks="+relayDataChunks.length); console.log('[Relay] playRelayChunk called, chunks:', relayDataChunks.length, 'blobPlaying:', relayBlobPlaying);
-  if (relayDataChunks.length === 0) {
-    relayBlobPlaying = false;
-    return;
+// Clean up relay MediaSource
+function cleanupRelaySource() {
+  if (relaySourceBuffer) {
+    try { relaySourceBuffer.abort(); } catch(_) {}
+    relaySourceBuffer = null;
   }
-  relayBlobPlaying = true;
-  const chunks = relayDataChunks.splice(0);
-  relayDebug("Blob bytes="+(chunks.reduce((s,c) => s + c.byteLength, 0))); console.log('[Relay] Creating Blob from', chunks.length, 'chunks, total bytes:', chunks.reduce((s,c) => s + c.byteLength, 0));
-  const blob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
-  const url = URL.createObjectURL(blob);
+  if (relayMediaSource) {
+    try {
+      if (relayMediaSource.readyState === 'open') relayMediaSource.endOfStream();
+    } catch(_) {}
+    relayMediaSource = null;
+  }
+  relayDataQueue = [];
+}
+
+// Restore MediaSource as audio source after P2P took over
+function restoreRelaySource() {
   const audioEl = document.getElementById('p2pAudio');
-  relayDebug("audio paused="+audioEl.paused+" srcObject="+!!audioEl.srcObject); console.log('[Relay] Audio element: paused=', audioEl.paused, 'srcObject=', !!audioEl.srcObject, 'src=', typeof audioEl.src);
-  if (audioEl._relayBlobUrl) URL.revokeObjectURL(audioEl._relayBlobUrl);
-  audioEl._relayBlobUrl = url;
-  // Clear srcObject before setting src (some browsers need this)
-  if (audioEl.srcObject) { audioEl.srcObject = null; }
-  audioEl.src = url;
-  audioEl.load();
-  const playPromise = audioEl.play();
-  if (playPromise) {
-    playPromise.then(() => {
-      relayDebug('play OK'); console.log('[Relay] play() succeeded');
-    }).catch(err => {
-      relayDebug('play FAIL: '+err.name); console.log('[Relay] play() failed:', err.name, err.message);
-    });
+  if (audioEl.srcObject) audioEl.srcObject = null;
+  if (_relayMsUrl && relayMediaSource) {
+    audioEl.src = _relayMsUrl;
   }
-  // 当前段播完后自动切到下一段（用 timeupdate 检测即将结束）
-  audioEl.onended = () => {
-    playRelayChunk();
-  };
-  // 2 秒兜底：如果还没播完就切（避免过大延迟）
-  clearTimeout(relayBlobTimer);
-  relayBlobTimer = setTimeout(() => {
-    if (audioEl.paused) return;
-    const remaining = audioEl.duration - audioEl.currentTime;
-    if (remaining < 0.5 && relayDataChunks.length > 0) {
-      playRelayChunk();
-    }
-  }, 2000);
 }
 
 // --- Initialize UI based on URL params ---
@@ -512,11 +539,8 @@ function handleSignaling(msg) {
           document.getElementById('playHint').textContent = '中继模式（16kbps保底）';
           setStatus('playing', '中继播放 📡');
           isPlaying = true;
+          restoreRelaySource();
           const audioEl = document.getElementById('p2pAudio');
-          // 如果有累积的中继数据，触发播放
-          if (relayDataChunks.length > 0 && !relayBlobPlaying) {
-            playRelayChunk();
-          }
           audioEl.play().catch(() => {});
         }
       }, 5000);
@@ -554,7 +578,7 @@ function handleSignaling(msg) {
       // 6秒超时保护：如果 P2P 没真正接通，保持中继不变
       if (window._p2pTimeout) clearTimeout(window._p2pTimeout);
       window._p2pTimeout = setTimeout(() => {
-        if (!isPlaying && relayDataChunks.length > 0) {
+        if (!isPlaying && relayDataQueue.length > 0) {
           console.log('[Receiver] P2P超时未接通，保持中继');
         }
       }, 6000);
@@ -566,13 +590,8 @@ function handleSignaling(msg) {
       if (p2pPC) { p2pPC.close(); p2pPC = null; }
       pendingCandidates = [];
       _relayDetected = true;
-      // 只清 srcObject（如果之前 startPlayback 绑了 P2P 流）
-      const relayAudioEl = document.getElementById('p2pAudio');
-      relayAudioEl.onwaiting = null;
-      relayAudioEl.onplaying = null;
-      if (relayAudioEl.srcObject) {
-        relayAudioEl.srcObject = null;
-      }
+      // Restore MediaSource if P2P took over
+      restoreRelaySource();
       // TURN 中继模式隐藏音质选择
       document.getElementById('bitrateControl').classList.add('hidden');
       relayMode = true;
@@ -580,8 +599,7 @@ function handleSignaling(msg) {
       document.getElementById('playHint').textContent = '中继模式（16kbps保底）';
       setStatus('playing', '中继播放 📡');
       isPlaying = true;
-      // 确保 audio 在播（blob 自动触发，不需要额外操作）
-      relayAudioEl.play().catch(() => {});
+      document.getElementById('p2pAudio').play().catch(() => {});
       break;
 
     case 'webrtc-offer':
@@ -622,7 +640,6 @@ function handleWebRTCOffer(msg) {
       isPlaying = false;
     }
     // 不重置 relayMode——切换新连接时保持中继保底，等 P2P 实际连通再关
-    relayBlobPlaying = false;
   }
 
   // 根据 offer 中的 useTURN 标记决定 ICE 配置
@@ -663,10 +680,6 @@ function handleWebRTCOffer(msg) {
         if (audioEl.srcObject) {
           audioEl.srcObject = null;
         }
-        // 如果有累积中继数据且未播放，触发播放
-        if (relayDataChunks.length > 0 && !relayBlobPlaying) {
-          playRelayChunk();
-        }
         audioEl.play().catch(() => {});
         // TURN 中继模式隐藏音质选择
         document.getElementById('bitrateControl').classList.add('hidden');
@@ -684,9 +697,10 @@ function handleWebRTCOffer(msg) {
     } else if (state === 'failed' || state === 'disconnected') {
       // TURN 模式下中继还在播，忽略 P2P 连接断开
       if (_relayDetected) return;
-      // 中继保底在播时也不显示断开提示
+      // 中继保底在播时也不显示断开提示，自动恢复 relay source
       if (relayMode) {
         console.log('[ICE] P2P断开（中继保底中）:', state);
+        restoreRelaySource();
         return;
       }
       console.log('[ICE] P2P断开:', state, 'iceState:', p2pPC.iceConnectionState);
@@ -762,13 +776,8 @@ function stopPlayback() {
   const audioEl = document.getElementById('p2pAudio');
   // 清理中继
   relayMode = false;
-  relayBlobPlaying = false;
-  relayDataChunks = [];
-  clearTimeout(relayBlobTimer);
-  if (audioEl._relayBlobUrl) {
-    URL.revokeObjectURL(audioEl._relayBlobUrl);
-    audioEl._relayBlobUrl = null;
-  }
+  clearRelayP2PCheck();
+  cleanupRelaySource();
   if (p2pPC) { p2pPC.close(); p2pPC = null; }
   p2pRemoteStream = null;
   pendingCandidates = [];
