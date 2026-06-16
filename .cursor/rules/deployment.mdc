@@ -21,6 +21,12 @@ alwaysApply: true
 - commit 前缀：`add:` / `upd:` / `fix:` / `del:` 等
 - **本会话若无实质改动，不要空 push**
 
+## 稳定基线（回滚点）
+
+- **Tag**：`v6.14-stable`（定型版 V6.14-replace-join，2026-06-16）
+- **回滚**：`git checkout v6.14-stable` 后部署
+- **详情**：见 `.cursor/rules/stable-baseline.mdc`
+
 ## 线上日志与验证
 
 客户端通过 WebSocket 发送 `client-log`（sender/receiver 的 `logToServer`），服务端写入内存 ring buffer 与 `logs/debug.log`，并记录信令 `signal`、房间 `server` 事件。
