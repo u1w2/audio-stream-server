@@ -217,7 +217,12 @@ function setupRoomBroadcast(code) {
 function notifyConnectionLost() {
   if (Date.now() < _suppressConnectionLostUntil) return;
   if (_reconnecting || probePC || turnProbePC) return;
+  const turnPath = _onTurn || _lastOfferUseTURN;
+  if (p2pPC && p2pPC._createdAt && Date.now() - p2pPC._createdAt < 12000 && turnPath) {
+    return;
+  }
   if (ws && ws.readyState === 1) {
+    logToServer('发送 connection-lost ice=' + (p2pPC ? p2pPC.iceConnectionState : 'closed'), 'network');
     ws.send(JSON.stringify({
       type: 'connection-lost',
       receiverId: myReceiverId,
@@ -391,12 +396,13 @@ function bindReceiverIceHandlers(pc, useTurn) {
   pc.oniceconnectionstatechange = () => {
     if (pc._intentionalClose) return;
     const ice = pc.iceConnectionState;
+    const turnPath = !!(useTurn || _lastOfferUseTURN || _onTurn);
     logToServer('ice=' + ice + ' useTurn=' + useTurn, 'ice');
 
     if (ice === 'connected' || ice === 'completed') {
       clearReceiverDisconnectTimer();
       _reconnecting = false;
-      const isTurn = !!(useTurn || _lastOfferUseTURN);
+      const isTurn = turnPath;
       setTurnUI(isTurn);
       if (!isTurn) {
         detectRelayMode();
@@ -405,15 +411,17 @@ function bindReceiverIceHandlers(pc, useTurn) {
     } else if (ice === 'failed') {
       clearReceiverDisconnectTimer();
       _reconnecting = false;
-      if (!_onTurn && !turnProbePC) {
+      if (!turnPath && !turnProbePC) {
         logToServer('ice failed，通知 network-changed', 'network');
         notifyNetworkChanged();
+        notifyConnectionLost();
+      } else if (turnPath && pc._createdAt && Date.now() - pc._createdAt < 12000) {
+        logToServer('TURN 协商 failed（瞬态），等待 sender 重建', 'network');
       }
-      notifyConnectionLost();
       document.getElementById('playHint').textContent = '连接断开，等待重连...';
       setStatus('buffering', '重连中...');
     } else if (ice === 'disconnected') {
-      if (!_onTurn && !turnProbePC) {
+      if (!turnPath && !turnProbePC) {
         logToServer('ice disconnected，通知 network-changed', 'network');
         notifyNetworkChanged();
       }
@@ -422,13 +430,16 @@ function bindReceiverIceHandlers(pc, useTurn) {
         _receiverDisconnectTimer = null;
         if (!p2pPC || p2pPC !== pc) return;
         const current = pc.iceConnectionState;
-        if (current === 'disconnected' || current === 'failed') {
-          _reconnecting = false;
-          notifyConnectionLost();
-          document.getElementById('playHint').textContent = '连接断开，等待重连...';
-          setStatus('buffering', '重连中...');
+        if (current !== 'disconnected' && current !== 'failed') return;
+        if (turnPath && pc._createdAt && Date.now() - pc._createdAt < 12000) {
+          logToServer('TURN 协商 disconnected（瞬态），不发 connection-lost', 'network');
+          return;
         }
-      }, 1200);
+        _reconnecting = false;
+        notifyConnectionLost();
+        document.getElementById('playHint').textContent = '连接断开，等待重连...';
+        setStatus('buffering', '重连中...');
+      }, turnPath ? 5000 : 1200);
     }
   };
 
@@ -436,6 +447,8 @@ function bindReceiverIceHandlers(pc, useTurn) {
     if (pc._intentionalClose) return;
     if (pc.connectionState === 'failed') {
       clearReceiverDisconnectTimer();
+      const turnPath = !!(useTurn || _lastOfferUseTURN || _onTurn);
+      if (turnPath && pc._createdAt && Date.now() - pc._createdAt < 12000) return;
       notifyConnectionLost();
     }
   };
@@ -681,7 +694,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.9-p2p-playback joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.10-turn-grace joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
@@ -767,7 +780,7 @@ function handleSignaling(msg) {
 
     case 'reconnect-relay':
       console.log('[Receiver] 直接切换 TURN（无并行探测）');
-      suppressConnectionLost(6000);
+      suppressConnectionLost(12000);
       _reconnecting = true;
       closePCIntentionally();
       _lastOfferUseTURN = true;
@@ -884,6 +897,7 @@ function handleWebRTCOffer(msg) {
   _lastOfferUseTURN = useTurn;
   logToServer('创建连接 useTURN=' + useTurn, 'webrtc');
   p2pPC = new RTCPeerConnection(pcConfig);
+  p2pPC._createdAt = Date.now();
 
   p2pPC.ontrack = (e) => {
     p2pRemoteStream = e.streams[0];

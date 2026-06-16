@@ -184,6 +184,23 @@ function clearDisconnectTimer(deviceId) {
 }
 
 let _turnRecreateTimer = {};
+let _turnTransitionUntil = {};
+
+function isTurnTransition(deviceId) {
+  return (_turnTransitionUntil[deviceId] || 0) > Date.now();
+}
+
+function markTurnTransition(deviceId, ms) {
+  _turnTransitionUntil[deviceId] = Date.now() + (ms || 15000);
+  _p2pRestarting[deviceId] = true;
+  clearIceRestartAnswerTimeout(deviceId);
+  clearConnectWatchdog(deviceId);
+  setTimeout(() => { delete _p2pRestarting[deviceId]; }, ms || 15000);
+}
+
+function isTurnNegotiating(pc) {
+  return !!(pc && pc._useTURN && pc._createdAt && Date.now() - pc._createdAt < 10000);
+}
 
 function scheduleDirectTurnRecreate(deviceId) {
   if (_turnRecreateTimer[deviceId]) return;
@@ -210,7 +227,15 @@ function handlePeerLost(deviceId, pc) {
   if (pc._intentionalClose || pc._isProbe || pc._isTurnProbe) return;
   if (!deviceList[deviceId] || !localAudioTrack) return;
   if (peerConnections[deviceId] !== pc) return;
+  if (isTurnNegotiating(pc)) {
+    logToServer('TURN 协商中 transient ice，跳过 handlePeerLost device=' + deviceId, 'ice');
+    return;
+  }
   if (!pc._useTURN) {
+    if (isTurnTransition(deviceId)) {
+      logToServer('TURN 过渡中，跳过 P2P handlePeerLost device=' + deviceId, 'network');
+      return;
+    }
     restartIceP2P(deviceId);
     return;
   }
@@ -240,6 +265,11 @@ function bindIceHandlers(deviceId, pc, useTURN) {
       }
     } else if (ice === 'failed') {
       clearDisconnectTimer(deviceId);
+      if (isTurnNegotiating(pc)) {
+        logToServer('TURN 协商 failed（瞬态），延迟重建 device=' + deviceId, 'ice');
+        scheduleDirectTurnRecreate(deviceId);
+        return;
+      }
       handlePeerLost(deviceId, pc);
     } else if (ice === 'disconnected') {
       clearDisconnectTimer(deviceId);
@@ -258,6 +288,11 @@ function bindIceHandlers(deviceId, pc, useTURN) {
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'failed' && peerConnections[deviceId] === pc) {
       clearDisconnectTimer(deviceId);
+      if (isTurnNegotiating(pc)) {
+        logToServer('TURN connectionState failed（瞬态），延迟重建', 'ice');
+        scheduleDirectTurnRecreate(deviceId);
+        return;
+      }
       handlePeerLost(deviceId, pc);
     }
   };
@@ -286,6 +321,7 @@ function notifyReceiverMode(deviceId, mode, bitrate) {
 }
 
 function enterTurnMode(deviceId, pc) {
+  delete _turnTransitionUntil[deviceId];
   _onTurnSender = true;
   selectedBitrate = TURN_BITRATE;
   applyBitrateToPC(pc, TURN_BITRATE);
@@ -352,7 +388,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.9-p2p-playback 已加载', 'version');
+    logToServer('【版本】V6.10-turn-grace 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -525,6 +561,10 @@ function handleSignaling(msg) {
 
     case 'connection-lost':
       if (msg.receiverId && ensureReceiver(msg.receiverId)) {
+        if (isTurnTransition(msg.receiverId) || _turnRecreateTimer[msg.receiverId]) {
+          logToServer('忽略 connection-lost（TURN 过渡/重建中）', 'network');
+          break;
+        }
         if (probeConnections[msg.receiverId]) {
           logToServer('忽略 connection-lost（P2P 并行探测中）', 'network');
           break;
@@ -539,10 +579,10 @@ function handleSignaling(msg) {
         }
         const lostPc = peerConnections[msg.receiverId];
         if (_onTurnSender || (lostPc && lostPc._useTURN)) {
-          logToServer('忽略 connection-lost（TURN 模式/重建中）', 'network');
+          logToServer('忽略 connection-lost（TURN 模式）', 'network');
           break;
         }
-        logToServer('receiver 报告连接丢失，ICE restart device=' + msg.receiverId, 'network');
+        logToServer('receiver 报告 connection-lost，ICE restart device=' + msg.receiverId, 'network');
         handleNetworkChanged(msg.receiverId);
       }
       break;
@@ -614,6 +654,7 @@ function createPC(deviceId, useTURN, isProbe) {
     bindIceHandlers(deviceId, pc, useTURN);
   }
   pc._useTURN = useTURN;
+  pc._createdAt = Date.now();
   return pc;
 }
 
@@ -647,6 +688,8 @@ function createDirectTurn(deviceId) {
   if (!deviceList[deviceId] || peerConnections[deviceId]) return;
   if (turnProbeConnections[deviceId]) return;
   clearTurnRecreateTimer(deviceId);
+  markTurnTransition(deviceId, 15000);
+  updateDeviceMode(deviceId, 'connecting');
   logToServer('直接建立 TURN deviceId=' + deviceId, 'network');
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
@@ -863,6 +906,15 @@ async function restartIceP2P(deviceId) {
 
 function handleNetworkChanged(deviceId) {
   if (!deviceList[deviceId] || !localAudioTrack) return;
+  if (isTurnTransition(deviceId) || _turnRecreateTimer[deviceId]) {
+    logToServer('忽略 network-changed（TURN 过渡中）device=' + deviceId, 'network');
+    return;
+  }
+  const mainPc = peerConnections[deviceId];
+  if (_onTurnSender || (mainPc && mainPc._useTURN)) {
+    logToServer('忽略 network-changed（TURN 模式）device=' + deviceId, 'network');
+    return;
+  }
   _iceRestartCount[deviceId] = 0;
   _p2pRestartCount[deviceId] = 0;
   delete _p2pRestarting[deviceId];
@@ -1353,6 +1405,7 @@ function migrateDeviceId(oldId, newId) {
   rekeyDeviceMap(connectWatchdogTimers, oldId, newId);
   rekeyDeviceMap(iceRestartAnswerTimers, oldId, newId);
   rekeyDeviceMap(_turnRecreateTimer, oldId, newId);
+  rekeyDeviceMap(_turnTransitionUntil, oldId, newId);
   rekeyDeviceMap(_offerRetryCount, oldId, newId);
 }
 
