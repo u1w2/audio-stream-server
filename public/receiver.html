@@ -200,9 +200,11 @@ window.addEventListener('DOMContentLoaded', () => {
       // 预激活音频上下文，绕过移动端自动播放限制
       const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
       if (tempCtx.state === 'suspended') tempCtx.resume();
-      // 同时预激活 audio 元素——移动端要求 play 必须在用户手势中调用
+      // 同时预激活 audio 元素+初始化 MediaSource
       const audioEl = document.getElementById('p2pAudio');
       audioEl.play().then(() => audioEl.pause()).catch(() => {});
+      // 在用户手势中初始化 MediaSource
+      initRelayPlayback();
       activatePlayback(tempCtx);
     });
   } else {
@@ -294,7 +296,7 @@ const BR_TAGS = ['无损', '高', '中', '低', '极低', '省流'];
 const BR_SHORT = ['750K', '256K', '128K', '64K', '32K', '16K'];
 let currentBitrate = 750000;
 let currentBrIndex = 0; // 默认无损
-let stallCount = 0;
+
 
 function buildBrToggle() {
   const container = document.getElementById('brToggle');
@@ -378,16 +380,9 @@ function detectRelayMode() {
       // （独立的 relay candidate 可能只是收集到了，实际没有使用）
       if (hasRelay) {
         _relayDetected = true;
-        console.log('[Relay] 走 TURN 中继，中继流固定 16kbps，P2P 码率可调');
-        // 不再禁用音质选择——中继流固定16kbps，按钮调的是P2P Opus编码器
-        // 但把当前选中设为省流档（因为中继是16kbps，视觉上能看出当前在省流）
-        currentBitrate = 16000;
-        currentBrIndex = BR_LEVELS.indexOf(16000);
-        updateBrUI(currentBrIndex);
-        // 通知 sender 中继模式（仅记录，sender 知道中继流固定16kbps）
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'connection-status', receiverId: myReceiverId, mode: 'relay' }));
-        }
+        console.log('[Relay] 走 TURN 中继，隐藏音质控件，中继流固定 16kbps');
+        // 中继模式下不显示音质控制
+        document.getElementById('bitrateControl').classList.add('hidden');
       } else {
         console.log('[Relay] 尝试' + attempt + ': P2P直连');
         // 还没稳定，稍后重试
@@ -464,16 +459,18 @@ function handleSignaling(msg) {
       if (msg.qrDataUrl) {
         document.getElementById('qrImage').src = msg.qrDataUrl;
       }
-      // 开启中继保底：初始化 MediaSource 等待音频数据
-      initRelayPlayback();
+      // 开启中继保底：MediaSource 已在用户手势中初始化
       // 5秒后如果 P2P 还没连上，切换到中继模式
       setTimeout(() => {
         const p2pConnected = p2pPC && (p2pPC.connectionState === 'connected' || p2pPC.connectionState === 'completed');
-        if (!p2pConnected && !isPlaying) {
+        // 不检查 isPlaying——ontrack 可能提前触发了 startPlayback 但 P2P 根本没通
+        if (!p2pConnected) {
           console.log('[Relay] 5秒P2P未连通，切换到中继模式');
           if (p2pPC) { p2pPC.close(); p2pPC = null; pendingCandidates = []; }
+          isPlaying = false; // 重置，避免 startPlayback 误设
           relayMode = true;
-          document.getElementById('playHint').textContent = '中继模式（低码率）';
+          document.getElementById('bitrateControl').classList.add('hidden');
+          document.getElementById('playHint').textContent = '中继模式（16kbps保底）';
           setStatus('playing', '中继播放 📡');
           isPlaying = true;
           const audioEl = document.getElementById('p2pAudio');
@@ -540,7 +537,8 @@ function handleSignaling(msg) {
       // TURN 中继模式隐藏音质选择
       document.getElementById('bitrateControl').classList.add('hidden');
       relayMode = true;
-      document.getElementById('playHint').textContent = '中继模式（低码率）';
+      document.getElementById('bitrateControl').classList.add('hidden');
+      document.getElementById('playHint').textContent = '中继模式（16kbps保底）';
       setStatus('playing', '中继播放 📡');
       isPlaying = true;
       // 确保 audio 在播（blob 自动触发，不需要额外操作）
@@ -621,16 +619,8 @@ function handleWebRTCOffer(msg) {
       if (iceState === 'relay' || _lastOfferUseTURN) {
         console.log('[ICE] 确认走TURN中继 (iceState=' + iceState + ', useTURN=' + _lastOfferUseTURN + ')');
         _relayDetected = true;
-        // 走 TURN 时全靠中继流播放，P2P 音频 track 不用
-        // 不设 srcObject，保持中继 MediaSource 播放
-        // 但同步 UI 状态
-        const targetBr = 16000;
-        currentBitrate = targetBr;
-        userBitrateOverride = true;
-        stopAdapt();
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'connection-status', receiverId: myReceiverId, mode: 'relay' }));
-        }
+        // 中继模式下隐藏音质控件
+        document.getElementById('bitrateControl').classList.add('hidden');
         // 清除可能的 P2P srcObject，恢复中继 blob 播放
         const audioEl = document.getElementById('p2pAudio');
         if (audioEl.srcObject) {
@@ -700,7 +690,7 @@ function startPlayback() {
     audioCtx.resume();
   }
 
-  // P2P 实际连通，关闭中继保底
+  // P2P 实际连通，关闭中继保底，恢复音质控件
   relayMode = false;
   // 清除 P2P 超时保护
   if (window._p2pTimeout) { clearTimeout(window._p2pTimeout); window._p2pTimeout = null; }
