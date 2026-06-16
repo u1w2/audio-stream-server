@@ -129,6 +129,37 @@ wss.on('connection', (ws) => {
         }
         const room = rooms[code];
 
+        // 清理已断开的 receiver，并通知 sender 移除对应设备
+        room.receivers.filter(r => r.readyState !== 1).forEach(dead => {
+          if (room.sender && room.sender.readyState === 1 && dead._receiverId) {
+            room.sender.send(JSON.stringify({
+              type: 'peer-left',
+              receiverId: dead._receiverId,
+              connections: 0,
+            }));
+          }
+        });
+        room.receivers = room.receivers.filter(r => r.readyState === 1);
+
+        // 同一 WebSocket 重复 join：仅恢复会话，不重复注册设备
+        if (ws._receiverId) {
+          const existing = room.receivers.find(r => r === ws);
+          if (existing) {
+            const host = room._host || 'www.u1w2.com';
+            const joinUrl = `https://${host}/receiver?code=${code}&t=${Date.now()}`;
+            let qrDataUrl = null;
+            try { qrDataUrl = await generateQRDataURL(joinUrl); } catch (_) {}
+            ws.send(JSON.stringify({
+              type: 'joined',
+              code,
+              receiverId: ws._receiverId,
+              qrDataUrl,
+              joinUrl,
+            }));
+            break;
+          }
+        }
+
         if (room.receivers.length >= room.maxConnections) {
           ws.send(JSON.stringify({ type: 'error', message: `房间已满（上限 ${room.maxConnections} 个设备）` }));
           return;

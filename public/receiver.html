@@ -246,10 +246,8 @@ function bindReceiverIceHandlers(pc, useTurn) {
 }
 
 window.addEventListener('online', () => {
-  if (roomCode && ws && ws.readyState !== 1) {
-    connectWS().then(() => {
-      ws.send(JSON.stringify({ type: 'join', code: roomCode }));
-    }).catch(() => {});
+  if (roomCode && (!ws || ws.readyState !== WebSocket.OPEN)) {
+    scheduleWsReconnect();
   }
 });
 
@@ -426,8 +424,35 @@ function detectRelayMode() {
 }
 
 // --- WebSocket (signaling only) ---
+let _wsReconnectTimer = null;
+
+function scheduleWsReconnect() {
+  if (!roomCode || _wsReconnectTimer) return;
+  _wsReconnectTimer = setTimeout(() => {
+    _wsReconnectTimer = null;
+    if (!roomCode || (ws && ws.readyState === WebSocket.OPEN)) return;
+    connectWS().then(() => {
+      ws.send(JSON.stringify({ type: 'join', code: roomCode }));
+    }).catch(() => scheduleWsReconnect());
+  }, 3000);
+}
+
 function connectWS() {
   return new Promise((resolve, reject) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      resolve();
+      return;
+    }
+
+    const oldWs = ws;
+    ws = null;
+    if (oldWs) {
+      oldWs.onclose = null;
+      oldWs.onmessage = null;
+      oldWs.onerror = null;
+      try { oldWs.close(); } catch (_) {}
+    }
+
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}`);
 
@@ -440,16 +465,7 @@ function connectWS() {
     ws.onerror = (e) => { clearTimeout(timeout); reject(new Error('WebSocket 连接失败')); };
     ws.onclose = () => {
       setStatus('connected', '信令断开，音频继续');
-      // P2P 持续播放，但自动重连信令通道
-      if (roomCode) {
-        setTimeout(() => {
-          if (ws.readyState > 1) {
-            connectWS().then(() => {
-              ws.send(JSON.stringify({ type: 'join', code: roomCode }));
-            }).catch(() => {});
-          }
-        }, 3000);
-      }
+      scheduleWsReconnect();
     };
 
     ws.onmessage = (e) => {

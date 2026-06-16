@@ -332,11 +332,10 @@ function handleSignaling(msg) {
 
     case 'peer-ready': {
       const devId = msg.receiverId || ('device-' + (deviceCounter + 1));
-      deviceCounter++;
-      deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
+      const serverCount = msg.connections || 1;
+      registerDevice(devId, serverCount);
       updateDeviceList();
-      // P2P: 建连接发音频
-      if (localAudioTrack) {
+      if (localAudioTrack && !peerConnections[devId] && !probeConnections[devId]) {
         startP2P(devId);
       }
       if (!isStreaming) {
@@ -719,6 +718,60 @@ function updateDeviceMode(deviceId, mode) {
     deviceList[deviceId].mode = mode;
     updateDeviceList();
   }
+}
+
+function rekeyDeviceMap(map, oldId, newId) {
+  if (map[oldId] !== undefined) {
+    map[newId] = map[oldId];
+    delete map[oldId];
+  }
+}
+
+function migrateDeviceId(oldId, newId) {
+  if (oldId === newId || !deviceList[oldId]) return;
+  logToServer('设备 ID 迁移 ' + oldId + ' -> ' + newId);
+  deviceList[newId] = deviceList[oldId];
+  delete deviceList[oldId];
+  rekeyDeviceMap(peerConnections, oldId, newId);
+  rekeyDeviceMap(probeConnections, oldId, newId);
+  rekeyDeviceMap(disconnectTimers, oldId, newId);
+  rekeyDeviceMap(_relayRetryTimer, oldId, newId);
+  rekeyDeviceMap(probeTimeouts, oldId, newId);
+  rekeyDeviceMap(probeVerifyTimers, oldId, newId);
+  rekeyDeviceMap(probeFailBackoff, oldId, newId);
+  rekeyDeviceMap(_p2pRetrying, oldId, newId);
+}
+
+function registerDevice(devId, serverCount) {
+  if (deviceList[devId]) {
+    deviceList[devId].mode = deviceList[devId].mode || 'connecting';
+    return 'exists';
+  }
+
+  const ids = Object.keys(deviceList);
+  // 仅一台设备在线但 receiverId 变化（信令重连）：合并为同一设备
+  if (serverCount === 1 && ids.length === 1 && ids[0] !== devId) {
+    migrateDeviceId(ids[0], devId);
+    deviceList[devId].mode = 'connecting';
+    return 'migrated';
+  }
+
+  // 清理无 WebRTC 连接的僵尸条目
+  ids.forEach(oldId => {
+    if (oldId !== devId && !peerConnections[oldId] && !probeConnections[oldId]) {
+      delete deviceList[oldId];
+      clearP2PRetry(oldId);
+    }
+  });
+
+  if (deviceList[devId]) {
+    deviceList[devId].mode = 'connecting';
+    return 'exists';
+  }
+
+  deviceCounter++;
+  deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
+  return 'new';
 }
 
 function cleanupPeerConnection(deviceId, intentional) {
