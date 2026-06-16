@@ -647,7 +647,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.7-receiver-recover joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.8-offer-recover joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
@@ -791,6 +791,10 @@ function handleWebRTCOffer(msg) {
   }
 
   const useTurn = !!msg.useTURN;
+  logToServer(
+    '收到 offer useTURN=' + useTurn + ' iceRestart=' + !!msg.iceRestart + ' hasPC=' + !!p2pPC,
+    'webrtc'
+  );
 
   if (msg.iceRestart && p2pPC && !useTurn && !_lastOfferUseTURN) {
     _reconnecting = false;
@@ -816,12 +820,18 @@ function handleWebRTCOffer(msg) {
           receiverId: myReceiverId,
           sdp: p2pPC.localDescription.toJSON(),
         }));
+        logToServer('ICE restart 已发送 answer', 'webrtc');
       }
-    }).catch(() => {
+    }).catch((err) => {
+      logToServer('ICE restart answer 失败: ' + (err?.message || err), 'webrtc');
       closePCIntentionally();
       notifyNetworkChanged();
     });
     return;
+  }
+
+  if (msg.iceRestart && !p2pPC) {
+    logToServer('iceRestart offer 但 PC 已关闭，按全新连接处理', 'webrtc');
   }
 
   if (p2pPC) {
@@ -864,9 +874,12 @@ function handleWebRTCOffer(msg) {
   }).then(answer => p2pPC.setLocalDescription(answer)).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'webrtc-answer', receiverId: myReceiverId, sdp: p2pPC.localDescription.toJSON() }));
+      logToServer('已发送 answer useTURN=' + useTurn, 'webrtc');
     }
-  }).catch(() => {
+  }).catch((err) => {
+    logToServer('offer 处理失败: ' + (err?.message || err), 'webrtc');
     if (p2pPC) { p2pPC.close(); p2pPC = null; }
+    notifyNetworkChanged();
   });
 }
 

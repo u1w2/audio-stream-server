@@ -328,7 +328,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.7-receiver-recover 已加载', 'version');
+    logToServer('【版本】V6.8-offer-recover 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -419,6 +419,7 @@ function handleSignaling(msg) {
       const pc = resolvePC(msg.receiverId, msg.isProbe, msg.isTurnProbe);
       if (pc) {
         clearIceRestartAnswerTimeout(msg.receiverId);
+        delete _offerRetryCount[msg.receiverId];
         clearConnectWatchdog(msg.receiverId);
         pc.setRemoteDescription(new RTCSessionDescription(msg.sdp)).catch(() => {});
       }
@@ -671,6 +672,7 @@ let _iceRestartCount = {};
 let p2pFailoverTimers = {};
 let connectWatchdogTimers = {};
 let iceRestartAnswerTimers = {};
+let _offerRetryCount = {};
 
 function clearIceRestartAnswerTimeout(deviceId) {
   if (iceRestartAnswerTimers[deviceId]) {
@@ -683,17 +685,34 @@ function scheduleIceRestartAnswerTimeout(deviceId) {
   scheduleOfferAnswerTimeout(deviceId);
 }
 
-function scheduleOfferAnswerTimeout(deviceId) {
+function scheduleOfferAnswerTimeout(deviceId, isRetry) {
   clearIceRestartAnswerTimeout(deviceId);
+  if (!isRetry) delete _offerRetryCount[deviceId];
+  const delay = isRetry ? 12000 : 8000;
   iceRestartAnswerTimers[deviceId] = setTimeout(() => {
     delete iceRestartAnswerTimers[deviceId];
     const pc = peerConnections[deviceId];
     if (!pc || pc._p2pVerified) return;
     const ice = pc.iceConnectionState;
     if (ice === 'connected' || ice === 'completed') return;
-    logToServer('offer 无 answer，移除僵尸设备 deviceId=' + deviceId, 'stale');
+
+    if (!_offerRetryCount[deviceId] && deviceList[deviceId]) {
+      _offerRetryCount[deviceId] = 1;
+      logToServer(
+        'offer 无 answer，force-rejoin 重试 deviceId=' + deviceId + ' ice=' + ice,
+        'stale'
+      );
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'force-rejoin', targetReceiverId: deviceId }));
+      }
+      scheduleOfferAnswerTimeout(deviceId, true);
+      return;
+    }
+
+    delete _offerRetryCount[deviceId];
+    logToServer('offer 仍无 answer，移除僵尸设备 deviceId=' + deviceId, 'stale');
     removeStaleReceiver(deviceId);
-  }, 8000);
+  }, delay);
 }
 
 function removeStaleReceiver(deviceId) {
@@ -712,6 +731,7 @@ function removeStaleReceiver(deviceId) {
   delete _iceRestartCount[deviceId];
   delete _p2pRestartCount[deviceId];
   delete _p2pRestarting[deviceId];
+  delete _offerRetryCount[deviceId];
   updateDeviceList();
   if (Object.keys(deviceList).length === 0) {
     document.getElementById('btnStop').classList.add('hidden');
@@ -853,7 +873,6 @@ function restartP2P(deviceId) {
 
   startP2P(deviceId);
   scheduleP2PFailoverToTurn(deviceId);
-  scheduleOfferAnswerTimeout(deviceId);
 
   setTimeout(() => { delete _p2pRestarting[deviceId]; }, 5000);
 }
