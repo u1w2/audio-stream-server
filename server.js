@@ -136,6 +136,36 @@ function generateCode() {
   return code;
 }
 
+function evictReceiver(room, roomCode, victimWs, reason) {
+  const oldId = victimWs._receiverId;
+  const idx = room.receivers.indexOf(victimWs);
+  if (idx !== -1) room.receivers.splice(idx, 1);
+  try {
+    victimWs.send(JSON.stringify({ type: 'session-replaced', reason: reason || 'replaced' }));
+  } catch (_) {}
+  try {
+    victimWs.close(4000, reason || 'replaced');
+  } catch (_) {}
+  if (room.sender && room.sender.readyState === 1 && oldId) {
+    room.sender.send(JSON.stringify({
+      type: 'peer-left',
+      receiverId: oldId,
+      connections: room.receivers.length,
+      reason: 'replaced',
+    }));
+  }
+  appendDebugLog('server', 'Receiver evicted: ' + (reason || 'replaced'), {
+    room: roomCode,
+    receiverId: oldId,
+    remaining: room.receivers.length,
+  });
+}
+
+function evictOtherReceivers(room, roomCode, keepWs, reason) {
+  const victims = room.receivers.filter(r => r !== keepWs);
+  victims.forEach(v => evictReceiver(room, roomCode, v, reason));
+}
+
 async function generateQRDataURL(text) {
   try {
     return await QRCode.toDataURL(text, {
@@ -223,6 +253,11 @@ wss.on('connection', (ws) => {
             appendDebugLog('server', 'Receiver re-joined (same ws)', { room: code, receiverId: ws._receiverId });
             break;
           }
+        }
+
+        const replaceSession = msg.replaceSession !== false;
+        if (replaceSession && room.receivers.length > 0) {
+          evictOtherReceivers(room, code, ws, 'replace_session');
         }
 
         if (room.receivers.length >= room.maxConnections) {

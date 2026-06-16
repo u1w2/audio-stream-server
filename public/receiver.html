@@ -507,6 +507,17 @@ window.addEventListener('online', () => {
 // --- Initialize UI based on URL params ---
 const urlParams = new URLSearchParams(window.location.search);
 const preCode = urlParams.get('code');
+const allowMultiJoin = urlParams.get('multi') === '1';
+
+function buildJoinMessage(code, opts) {
+  const msg = { type: 'join', code };
+  if (opts && opts.replaceSession === false) {
+    msg.replaceSession = false;
+  } else if (!allowMultiJoin) {
+    msg.replaceSession = true;
+  }
+  return msg;
+}
 
 window.addEventListener('DOMContentLoaded', () => {
   const actionArea = document.getElementById('actionArea');
@@ -577,7 +588,7 @@ async function activatePlayback(ctx) {
     roomCode = pendingCode;
     setupRoomBroadcast(pendingCode);
     document.getElementById('playHint').textContent = '等待音频...';
-    ws.send(JSON.stringify({ type: 'join', code: pendingCode }));
+    ws.send(JSON.stringify(buildJoinMessage(pendingCode)));
   } catch (err) {
     document.getElementById('playHint').textContent = '连接失败，请重试';
     document.getElementById('playHint').style.color = '#fca5a5';
@@ -604,7 +615,7 @@ async function manualJoin() {
     await connectWS();
     roomCode = code;
     setupRoomBroadcast(code);
-    ws.send(JSON.stringify({ type: 'join', code }));
+    ws.send(JSON.stringify(buildJoinMessage(code)));
   } catch (err) {
     alert('连接服务器失败');
     btn.disabled = false;
@@ -687,7 +698,7 @@ function scheduleWsReconnect() {
     _wsReconnectTimer = null;
     if (!roomCode || (ws && ws.readyState === WebSocket.OPEN)) return;
     connectWS().then(() => {
-      ws.send(JSON.stringify({ type: 'join', code: roomCode }));
+      ws.send(JSON.stringify(buildJoinMessage(roomCode, { replaceSession: false })));
     }).catch(() => scheduleWsReconnect());
   }, 3000);
 }
@@ -736,7 +747,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.13-p2p-grace joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.14-replace-join joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
@@ -816,7 +827,18 @@ function handleSignaling(msg) {
       document.getElementById('playHint').textContent = '重新连接...';
       setStatus('buffering', '重连中...');
       if (ws && ws.readyState === WebSocket.OPEN && roomCode) {
-        ws.send(JSON.stringify({ type: 'join', code: roomCode }));
+        ws.send(JSON.stringify(buildJoinMessage(roomCode, { replaceSession: false })));
+      }
+      break;
+
+    case 'session-replaced':
+      logToServer('会话已被新页面取代 session-replaced', 'session');
+      suppressConnectionLost(5000);
+      stopPlayback();
+      document.getElementById('playHint').textContent = '已在其他页面打开';
+      setStatus('error', '已在其他页面打开');
+      if (ws) {
+        try { ws.close(); } catch (_) {}
       }
       break;
 

@@ -481,7 +481,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.13-p2p-grace 已加载', 'version');
+    logToServer('【版本】V6.14-replace-join 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -590,15 +590,13 @@ function handleSignaling(msg) {
 
     case 'peer-left': {
       if (msg.receiverId && deviceList[msg.receiverId]) {
-        cleanupProbeConnection(msg.receiverId);
-        cleanupTurnProbeConnection(msg.receiverId);
-        cleanupPeerConnection(msg.receiverId);
-        delete deviceList[msg.receiverId];
+        dropReceiver(msg.receiverId);
+      } else if (msg.reason === 'replaced') {
+        Object.keys(deviceList).forEach(id => dropReceiver(id));
       } else {
         const keys = Object.keys(deviceList);
         if (keys.length > 0) {
-          cleanupPeerConnection(keys[0]);
-          delete deviceList[keys[0]];
+          dropReceiver(keys[0]);
         }
       }
       updateDeviceList();
@@ -886,16 +884,17 @@ function scheduleOfferAnswerTimeout(deviceId, isRetry) {
   }, delay);
 }
 
-function removeStaleReceiver(deviceId) {
-  logToServer('移除僵尸/超时设备 deviceId=' + deviceId, 'stale');
-  if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'force-rejoin', targetReceiverId: deviceId }));
-  }
+function dropReceiver(deviceId) {
+  if (!deviceId) return;
+  logToServer('移除设备 deviceId=' + deviceId, 'session');
   clearConnectWatchdog(deviceId);
   clearP2PFailoverTimer(deviceId);
   clearIceRestartAnswerTimeout(deviceId);
   clearPostAnswerConnectWatchdog(deviceId);
   clearP2pMediaVerifyTimer(deviceId);
+  clearP2PRetry(deviceId);
+  clearTurnRecreateTimer(deviceId);
+  clearDisconnectTimer(deviceId);
   cleanupTurnProbeConnection(deviceId);
   cleanupProbeConnection(deviceId);
   cleanupPeerConnection(deviceId, true);
@@ -904,6 +903,18 @@ function removeStaleReceiver(deviceId) {
   delete _p2pRestartCount[deviceId];
   delete _p2pRestarting[deviceId];
   delete _offerRetryCount[deviceId];
+  delete _networkChangeDebounce[deviceId];
+  delete _networkTransitionUntil[deviceId];
+  delete _postAnswerExtendCount[deviceId];
+  delete _turnRecreateBackoff[deviceId];
+}
+
+function removeStaleReceiver(deviceId) {
+  logToServer('移除僵尸/超时设备 deviceId=' + deviceId, 'stale');
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'force-rejoin', targetReceiverId: deviceId }));
+  }
+  dropReceiver(deviceId);
   updateDeviceList();
   if (Object.keys(deviceList).length === 0) {
     document.getElementById('btnStop').classList.add('hidden');
@@ -1597,18 +1608,24 @@ function registerDevice(devId, serverCount) {
   }
 
   const ids = Object.keys(deviceList);
-  // 仅一台设备在线但 receiverId 变化（信令重连）：合并为同一设备
-  if (serverCount === 1 && ids.length === 1 && ids[0] !== devId) {
-    migrateDeviceId(ids[0], devId);
-    deviceList[devId].mode = 'connecting';
-    return 'migrated';
+
+  // 服务端 replace_session 后仅一新 receiver：清理/合并旧 deviceId
+  if (serverCount === 1 && ids.length >= 1) {
+    ids.forEach(oldId => {
+      if (oldId !== devId) dropReceiver(oldId);
+    });
+    const remaining = Object.keys(deviceList);
+    if (remaining.length === 1 && remaining[0] !== devId) {
+      migrateDeviceId(remaining[0], devId);
+      deviceList[devId].mode = 'connecting';
+      return 'migrated';
+    }
   }
 
   // 清理无 WebRTC 连接的僵尸条目
-  ids.forEach(oldId => {
-    if (oldId !== devId && !peerConnections[oldId] && !probeConnections[oldId]) {
-      delete deviceList[oldId];
-      clearP2PRetry(oldId);
+  Object.keys(deviceList).forEach(oldId => {
+    if (oldId !== devId && !peerConnections[oldId] && !probeConnections[oldId] && !turnProbeConnections[oldId]) {
+      dropReceiver(oldId);
     }
   });
 
