@@ -98,23 +98,7 @@ wss.on('connection', (ws) => {
   let currentRoom = null;
   let currentRole = null;
 
-  ws.on('message', async (raw, isBinary) => {
-    // Binary messages = audio relay data (sender → server → receivers)
-    if (isBinary) {
-      if (currentRoom && rooms[currentRoom]) {
-        const room = rooms[currentRoom];
-        if (currentRole === 'sender') {
-          // 广播给所有 receiver
-          for (const r of room.receivers) {
-            if (r.readyState === 1) {
-              try { r.send(raw); } catch(_) {}
-            }
-          }
-        }
-      }
-      return;
-    }
-
+  ws.on('message', async (raw) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
@@ -172,7 +156,12 @@ wss.on('connection', (ws) => {
       case 'connection-status': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
-        if (room.sender && room.sender.readyState === 1) {
+        if (msg.targetReceiverId && room.receivers) {
+          const target = room.receivers.find(r => r._receiverId === msg.targetReceiverId);
+          if (target && target.readyState === 1) {
+            target.send(JSON.stringify(msg));
+          }
+        } else if (room.sender && room.sender.readyState === 1) {
           room.sender.send(JSON.stringify({
             type: 'connection-status',
             receiverId: msg.receiverId,
@@ -208,7 +197,7 @@ wss.on('connection', (ws) => {
       case 'webrtc-ice':
       case 'reconnect-p2p':
       case 'reconnect-relay':
-      case 'p2p-check': {
+      case 'connection-lost': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
         console.log(`[Signal] ${msg.type} from ${currentRole} room=${currentRoom} targetId=${msg.targetReceiverId||''} recvId=${msg.receiverId||''}`);
@@ -257,7 +246,7 @@ wss.on('connection', (ws) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🎵 Audio Stream (P2P only)`);
+  console.log(`\n🎵 Audio Stream (P2P + TURN)`);
   console.log(`   电脑端: http://localhost:${PORT}`);
   console.log(`   手机端: http://${DEFAULT_IP}:${PORT}/receiver\n`);
 });

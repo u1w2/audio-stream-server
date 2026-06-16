@@ -118,10 +118,6 @@ let isStreaming = false;
 let deviceCounter = 0;
 let deviceList = {};
 let selectedBitrate = 750000; // 默认无损
-// 中继相关
-let relayRecorder = null;
-// P2P稳定计时：P2P连接成功后等30秒才关中继
-let p2pStableTimers = {}; // deviceId → setTimeout ID
 
 // WebRTC
 let peerConnections = {};
@@ -150,12 +146,12 @@ function checkSecureContext() {
 }
 checkSecureContext();
 
-// 全局 P2P 重试引擎：每 5 秒检查一次所有设备，如果 relay 模式就自动尝试 P2P
-let _globalP2PRetryTimer = null;
-let _globalP2PActive = false; // true 表示当前是 P2P（非中继）模式
-
-// --- TURN relay 检测（sender 端）：一旦发现走中继，锁定码率 ---
-let _relayDetectedSender = false;
+// 当前是否走 TURN（锁 16kbps，保护服务器带宽）
+let _onTurnSender = false;
+const TURN_BITRATE = 16000;
+const P2P_RETRY_INTERVAL_MS = 15000;
+const ICE_DISCONNECTED_GRACE_MS = 2500; // disconnected 后等待 ICE 自恢复
+const disconnectTimers = {};
 // 调试日志：通过 WebSocket 发送到服务端
 function logToServer(text) {
   if (ws && ws.readyState === 1) {
@@ -163,52 +159,102 @@ function logToServer(text) {
   }
   console.log('[Sender] ' + text);
 }
-function detectRelayOnPeer(pc) {
-  if (_relayDetectedSender) return;
-  const doCheck = (attempt) => {
-    if (!pc || _relayDetectedSender) return;
-    pc.getStats().then(stats => {
-      let hasRelay = false;
-      stats.forEach(report => {
-        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
-          if (report.localCandidateType === 'relay' || report.remoteCandidateType === 'relay') {
-            hasRelay = true;
-          }
-        }
-        if (report.candidateType === 'relay' || report.type === 'relay') {
-          hasRelay = true;
-        }
-        if (report.ip === '39.101.174.208' || report.address === '39.101.174.208') {
-          hasRelay = true;
-        }
-      });
-      if (hasRelay) {
-        _relayDetectedSender = true;
-        console.log('[Sender Relay] 走 TURN 中继，强制 16kbps');
-        selectedBitrate = 16000;
-        // 立即应用到所有 peer 连接
-        Object.entries(peerConnections).forEach(([id, p]) => {
-          const sender = p.getSenders().find(s => s.track && s.track.kind === 'audio');
-          if (sender) {
-            const params = sender.getParameters();
-            if (!params.encodings) params.encodings = [{}];
-            params.encodings[0].maxBitrate = 16000;
-            sender.setParameters(params).catch(() => {});
-          }
-        });
+function applyBitrateToPC(pc, bitrate) {
+  const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+  if (!sender) return;
+  const params = sender.getParameters();
+  if (!params.encodings) params.encodings = [{}];
+  params.encodings[0].maxBitrate = bitrate;
+  sender.setParameters(params).catch(() => {});
+}
+
+function clearDisconnectTimer(deviceId) {
+  if (disconnectTimers[deviceId]) {
+    clearTimeout(disconnectTimers[deviceId]);
+    delete disconnectTimers[deviceId];
+  }
+}
+
+function handlePeerLost(deviceId, pc) {
+  if (!deviceList[deviceId] || !localAudioTrack) return;
+  if (peerConnections[deviceId] !== pc) return;
+  logToServer('连接丢失 useTURN=' + !!pc._useTURN);
+  cleanupPeerConnection(deviceId);
+  upgradeToTurn(deviceId);
+}
+
+function bindIceHandlers(deviceId, pc, useTURN) {
+  pc.oniceconnectionstatechange = () => {
+    const ice = pc.iceConnectionState;
+    logToServer('ice=' + ice + ' useTURN=' + useTURN);
+
+    if (ice === 'connected' || ice === 'completed') {
+      clearDisconnectTimer(deviceId);
+      updateDeviceMode(deviceId, useTURN ? 'turn' : 'p2p');
+      if (useTURN) {
+        enterTurnMode(deviceId, pc);
       } else {
-        console.log('[Sender Relay] 尝试' + attempt + ': P2P直连');
-        if (attempt < 3) {
-          setTimeout(() => doCheck(attempt + 1), 2000);
+        enterP2PMode(deviceId, pc);
+      }
+    } else if (ice === 'failed') {
+      clearDisconnectTimer(deviceId);
+      handlePeerLost(deviceId, pc);
+    } else if (ice === 'disconnected') {
+      clearDisconnectTimer(deviceId);
+      disconnectTimers[deviceId] = setTimeout(() => {
+        delete disconnectTimers[deviceId];
+        if (peerConnections[deviceId] !== pc) return;
+        const current = pc.iceConnectionState;
+        if (current === 'disconnected' || current === 'failed') {
+          handlePeerLost(deviceId, pc);
         }
-      }
-    }).catch(() => {
-      if (attempt < 3) {
-        setTimeout(() => doCheck(attempt + 1), 2000);
-      }
-    });
+      }, ICE_DISCONNECTED_GRACE_MS);
+    }
   };
-  doCheck(1);
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' && peerConnections[deviceId] === pc) {
+      clearDisconnectTimer(deviceId);
+      handlePeerLost(deviceId, pc);
+    }
+  };
+}
+
+// 网络恢复时自动探测 P2P（TURN 模式下）
+window.addEventListener('online', () => {
+  if (!_onTurnSender) return;
+  Object.keys(deviceList).forEach(id => tryReconnectP2P(id));
+});
+
+function notifyReceiverMode(deviceId, mode, bitrate) {
+  if (!ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({
+    type: 'connection-status',
+    targetReceiverId: deviceId,
+    receiverId: deviceId,
+    mode,
+    bitrate,
+  }));
+}
+
+function enterTurnMode(deviceId, pc) {
+  _onTurnSender = true;
+  selectedBitrate = TURN_BITRATE;
+  applyBitrateToPC(pc, TURN_BITRATE);
+  updateDeviceMode(deviceId, 'turn');
+  notifyReceiverMode(deviceId, 'turn', TURN_BITRATE);
+  startP2PRetry(deviceId);
+  logToServer('TURN 中继已启用，16kbps');
+}
+
+function enterP2PMode(deviceId, pc) {
+  _onTurnSender = false;
+  selectedBitrate = 750000;
+  applyBitrateToPC(pc, 750000);
+  clearP2PRetry(deviceId);
+  updateDeviceMode(deviceId, 'p2p');
+  notifyReceiverMode(deviceId, 'p2p', 750000);
+  logToServer('P2P 直连，切断 TURN');
 }
 
 // --- WebSocket (signaling only) ---
@@ -216,7 +262,6 @@ function connectWS() {
   return new Promise((resolve, reject) => {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}`);
-    ws.binaryType = 'arraybuffer';
 
     const timeout = setTimeout(() => {
       ws.close();
@@ -255,55 +300,12 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V2-p2pRetryLoop 已加载');
+    logToServer('【版本】V3-event-driven 已加载');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
     document.getElementById('btnCreate').disabled = false;
   }
-}
-
-// --- 中继推流（MediaRecorder → WebSocket → server） ---
-function startRelay(stream) {
-  if (relayRecorder) { console.log('[Relay] Already started, skipping'); return; }
-  console.log('[Relay] Starting relay recorder with stream tracks:', stream.getAudioTracks().length);
-  // 用低码率 Opus 编码，通过 WebSocket 二进制推送到 server
-  const mimeType = 'audio/webm;codecs=opus';
-  if (!MediaRecorder.isTypeSupported(mimeType)) {
-    console.log('[Relay] Opus/webm not supported, skipping relay');
-    return;
-  }
-  try {
-    relayRecorder = new MediaRecorder(stream, {
-      mimeType,
-      audioBitsPerSecond: 16000, // 16kbps 省流保底
-    });
-    relayRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0 && ws && ws.readyState === 1) {
-        ws.send(e.data);
-      }
-    };
-    relayRecorder.onerror = (e) => {
-      console.log('[Relay] Recorder error:', e);
-    };
-    relayRecorder.start(500);
-    console.log('[Relay] Started at 16kbps, state:', relayRecorder.state);
-    // 标记所有设备为中继模式
-    Object.keys(deviceList).forEach(devId => {
-      updateDeviceMode(devId, 'relay');
-    });
-    console.log('[Relay] Started at 16kbps');
-  } catch (err) {
-    console.log('[Relay] Failed:', err.message);
-    relayRecorder = null;
-  }
-}
-
-function stopRelay() {
-  if (relayRecorder && relayRecorder.state !== 'inactive') {
-    relayRecorder.stop();
-  }
-  relayRecorder = null;
 }
 
 function handleSignaling(msg) {
@@ -314,10 +316,6 @@ function handleSignaling(msg) {
       document.getElementById('stepStreaming').classList.remove('hidden');
       document.getElementById('tipBox').classList.add('hidden');
       setStatus('connected', '房间已创建，等待手机扫码...');
-
-      // 不再需要全局 P2P 重试引擎——TURN 模式下由 startP2PRetry 每30秒自动尝试
-      _globalP2PActive = false;
-      // 清理所有残留的重试定时器
       Object.keys(_relayRetryTimer).forEach(did => clearP2PRetry(did));
 
       if (msg.qrDataUrl) {
@@ -337,10 +335,6 @@ function handleSignaling(msg) {
       // P2P: 建连接发音频
       if (localAudioTrack) {
         startP2P(devId);
-      }
-      // 启动中继推流（16kbps Opus WebSocket）
-      if (audioStream && !relayRecorder) {
-        startRelay(audioStream);
       }
       if (!isStreaming) {
         isStreaming = true;
@@ -405,37 +399,28 @@ function handleSignaling(msg) {
       break;
 
     case 'bitrate-change': {
-      // receiver 请求改变码率
       const br = msg.bitrate;
-      // 如果走中继，忽略码率调节（中继流固定16kbps保护服务器带宽）
-      if (_relayDetectedSender) {
-        console.log(`[Bitrate] 中继模式，忽略码率 ${br}，保持16kbps`);
-        // 但通知 receiver 实际还是16kbps
+      if (_onTurnSender) {
         if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 16000 }));
+          ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: TURN_BITRATE, receiverId: msg.receiverId }));
         }
         break;
       }
       selectedBitrate = br;
-      // 应用到所有连接
-      Object.entries(peerConnections).forEach(([id, pc]) => {
-        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
-        if (sender) {
-          const params = sender.getParameters();
-          if (!params.encodings) params.encodings = [{}];
-          params.encodings[0].maxBitrate = br;
-          sender.setParameters(params).catch(() => {});
-        }
-      });
+      Object.entries(peerConnections).forEach(([id, pc]) => applyBitrateToPC(pc, br));
       console.log(`[Bitrate] Changed to ${br} bps (requested by ${msg.receiverId})`);
       break;
     }
 
     case 'p2p-check':
-      // receiver 在中继模式下请求 sender 尝试 P2P
-      if (_relayDetectedSender && msg.receiverId) {
-        console.log('[Sender] receiver请求P2P尝试:', msg.receiverId);
-        tryReconnectP2P(msg.receiverId);
+      break;
+
+    case 'connection-lost':
+      if (msg.receiverId && deviceList[msg.receiverId]) {
+        logToServer('receiver 报告连接丢失');
+        const pc = peerConnections[msg.receiverId];
+        if (pc) cleanupPeerConnection(msg.receiverId);
+        upgradeToTurn(msg.receiverId);
       }
       break;
 
@@ -457,18 +442,9 @@ function createPC(deviceId, useTURN) {
     pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
   }
 
-  // 设置编码码率
-  const applyBitrate = () => {
-    const sender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
-    if (sender) {
-      const params = sender.getParameters();
-      if (!params.encodings) params.encodings = [{}];
-      params.encodings[0].maxBitrate = selectedBitrate;
-      sender.setParameters(params).catch(() => {});
-    }
-  };
-  setTimeout(applyBitrate, 100);
-  setTimeout(applyBitrate, 2000);
+  const initialBitrate = useTURN ? TURN_BITRATE : selectedBitrate;
+  setTimeout(() => applyBitrateToPC(pc, initialBitrate), 100);
+  setTimeout(() => applyBitrateToPC(pc, initialBitrate), 2000);
 
   pc.onicecandidate = (e) => {
     if (e.candidate && ws.readyState === 1) {
@@ -476,222 +452,73 @@ function createPC(deviceId, useTURN) {
     }
   };
 
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
-      updateDeviceMode(deviceId, 'p2p');
-      const iceState = pc.iceConnectionState;
-      logToServer('iceConnectionState=' + iceState + ' useTURN=' + useTURN);
-      if (iceState === 'relay' && useTURN) {
-        // 走了 TURN 中继 → 锁码率，启动 P2P 重试
-        logToServer('走TURN中继，锁16kbps');
-        _relayDetectedSender = true;
-        selectedBitrate = 16000;
-        applyBitrate();
-        startP2PRetry(deviceId);
-        // 清除 P2P 稳定计时（如果之前有的话）
-        if (p2pStableTimers[deviceId]) {
-          clearTimeout(p2pStableTimers[deviceId]);
-          delete p2pStableTimers[deviceId];
-        }
-      } else if (useTURN && iceState === 'connected') {
-        // TURN 连接成功但 iceState 没标记为 relay（浏览器差异）
-        // 同样锁码率并启动 P2P 重试
-        logToServer('TURN连接 iceState=' + iceState + '，锁16kbps，启动P2P重试');
-        _relayDetectedSender = true;
-        selectedBitrate = 16000;
-        applyBitrate();
-        startP2PRetry(deviceId);
-        if (p2pStableTimers[deviceId]) {
-          clearTimeout(p2pStableTimers[deviceId]);
-          delete p2pStableTimers[deviceId];
-        }
-      } else if (!useTURN && iceState === 'connected') {
-        // 纯 STUN 连接成功 → P2P 通了！恢复码率
-        logToServer('P2P直连成功，恢复码率');
-        _relayDetectedSender = false;
-        // 15秒稳定后才真正标记为 P2P 模式（防止反复横跳）
-        selectedBitrate = 750000;
-        applyBitrate();
-        // 清除之前的稳定计时器
-        if (p2pStableTimers[deviceId]) {
-          clearTimeout(p2pStableTimers[deviceId]);
-          delete p2pStableTimers[deviceId];
-        }
-        // 15秒后如果连接仍稳定，关闭中继保底，通知 receiver，标记 P2P 模式
-        p2pStableTimers[deviceId] = setTimeout(() => {
-          const p = peerConnections[deviceId];
-          if (p && (p.connectionState === 'connected' || p.connectionState === 'completed')) {
-            logToServer('P2P已稳定15秒，关闭中继保底，标记P2P模式');
-            _globalP2PActive = true;
-            stopRelay();
-            clearP2PRetry(deviceId);
-            // 通知 receiver 切回 P2P
-            if (ws && ws.readyState === 1) {
-              ws.send(JSON.stringify({ type: 'bitrate-change', bitrate: 750000 }));
-            }
-          }
-          delete p2pStableTimers[deviceId];
-        }, 5000);
-      } else {
-        console.log('[Sender] 其他状态: useTURN=' + useTURN + ' iceState=' + iceState);
-        // useTURN=true 时不再走 detectRelayOnPeer（已被上面新分支覆盖）
-        if (!useTURN) {
-          detectRelayOnPeer(pc);
-        }
-      }
-    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-      updateDeviceMode(deviceId, 'disconnected');
-      const wasManualRetry = pc._manualRetry;
-      cleanupPeerConnection(deviceId);
-      _globalP2PActive = false;
-      // 清除 P2P 稳定计时器
-      if (p2pStableTimers[deviceId]) {
-        clearTimeout(p2pStableTimers[deviceId]);
-        delete p2pStableTimers[deviceId];
-      }
-      if (deviceList[deviceId] && localAudioTrack) {
-        // P2P 断开，启动中继保底（如果还没启动）
-        if (!relayRecorder && audioStream) {
-          startRelay(audioStream);
-          console.log('[Relay] P2P断开，重新启动中继保底');
-        }
-        // 中继模式下不重复尝试——由 startP2PRetry 的30秒周期统一管理
-        if (!wasManualRetry && !_p2pRetrying[deviceId] && !_relayDetectedSender) {
-          setTimeout(() => startP2P(deviceId, true), 2000);
-        }
-      }
-    }
-  };
-
+  bindIceHandlers(deviceId, pc, useTURN);
+  pc._useTURN = useTURN;
   return pc;
+}
+
+function upgradeToTurn(deviceId) {
+  if (!deviceList[deviceId] || peerConnections[deviceId]) return;
+  logToServer('升级 TURN deviceId=' + deviceId);
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
+  }
+  const pc = createPC(deviceId, true);
+  if (!pc) return;
+  pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'webrtc-offer',
+        targetReceiverId: deviceId,
+        useTURN: true,
+        sdp: pc.localDescription.toJSON(),
+      }));
+    }
+  }).catch(() => cleanupPeerConnection(deviceId));
 }
 
 function startP2P(deviceId, fromRetry) {
   if (peerConnections[deviceId]) return;
-  // 初始用纯 STUN 尝试 P2P
-  createPC(deviceId, false);
-  // 发起连接
-  const pc = peerConnections[deviceId];
+  const pc = createPC(deviceId, false);
   if (!pc) return;
+  pc._fromRetry = !!fromRetry;
 
-  pc.createOffer().then(offer => {
-    return pc.setLocalDescription(offer);
-  }).then(() => {
+  pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, useTURN: false, sdp: pc.localDescription.toJSON() }));
     }
-    // 3秒后检查：如果还没连上，升级到 TURN（仅首次连接时升级，重试场景保持中继）
-    setTimeout(() => {
-      const p = peerConnections[deviceId];
-      if (p && p.iceConnectionState !== 'connected' && p.iceConnectionState !== 'completed') {
-        if (fromRetry) {
-          // 重试场景：P2P不通，通知 receiver 切回中继，不清 PC 以避免 disconnect 循环
-          logToServer('P2P重试未连通，发reconnect-relay deviceId=' + deviceId);
-          // 不清理 PC，也不 return——让 receiver 保持中继，当前 PC 自然终了
-          if (ws && ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
-          }
-          return;
-        }
-        logToServer('P2P 3秒未连通，升级TURN连接');
-        cleanupPeerConnection(deviceId);
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
-        }
-        // 重建带 TURN 的连接
-        const relayPC = createPC(deviceId, true);
-        if (relayPC) {
-          relayPC.createOffer().then(offer => {
-            return relayPC.setLocalDescription(offer);
-          }).then(() => {
-            if (ws.readyState === 1) {
-              ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, useTURN: true, sdp: relayPC.localDescription.toJSON() }));
-            }
-            // TURN 连接已发出，标记为中继模式
-            _relayDetectedSender = true;
-            selectedBitrate = 16000;
-            applyBitrate();
-            logToServer('TURN降级完成 deviceId=' + deviceId);
-          }).catch(() => {
-            cleanupPeerConnection(deviceId);
-          });
-        }
-      }
-    }, 3000);
-    // 15秒后如果还在 connecting 状态则清理
-    setTimeout(() => {
-      if (deviceList[deviceId] && deviceList[deviceId].mode === 'connecting') {
-        updateDeviceMode(deviceId, 'timeout');
-        cleanupPeerConnection(deviceId);
-      }
-    }, 15000);
-  }).catch(() => {
-    cleanupPeerConnection(deviceId);
-  });
+  }).catch(() => cleanupPeerConnection(deviceId));
 }
 
-// 防止并发 P2P 重试
 let _p2pRetrying = {};
 
 function tryReconnectP2P(deviceId) {
-  if (!deviceList[deviceId] || !localAudioTrack) return;
-  if (_p2pRetrying[deviceId]) return;
+  if (!deviceList[deviceId] || !localAudioTrack || _p2pRetrying[deviceId]) return;
   _p2pRetrying[deviceId] = true;
-  if (peerConnections[deviceId]) {
-    cleanupPeerConnection(deviceId);
-  }
-  // 发信令通知 receiver 重建（纯 STUN）
+  logToServer('探测 P2P deviceId=' + deviceId);
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'reconnect-p2p', targetReceiverId: deviceId }));
   }
-  // 自己重建纯 STUN 连接
-  const pc = createPC(deviceId, false);
-  if (!pc) { delete _p2pRetrying[deviceId]; return; }
-  pc.createOffer().then(offer => {
-    return pc.setLocalDescription(offer);
-  }).then(() => {
-    if (ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, useTURN: false, sdp: pc.localDescription.toJSON() }));
-    }
-    // 3秒后检查 P2P 是否连通，不通则通知 receiver 切回中继
-    setTimeout(() => {
-      const p = peerConnections[deviceId];
-      if (p && p.iceConnectionState !== 'connected' && p.iceConnectionState !== 'completed') {
-        logToServer('tryReconnectP2P 3秒未连通，发reconnect-relay deviceId=' + deviceId);
-        cleanupPeerConnection(deviceId);
-        if (ws && ws.readyState === 1) {
-          ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
-        }
-      }
-    }, 3000);
-  }).catch(() => {
-    cleanupPeerConnection(deviceId);
-    delete _p2pRetrying[deviceId];
-  });
-  // 8秒后释放重试锁，允许下次重试
+  if (peerConnections[deviceId]) cleanupPeerConnection(deviceId);
+  startP2P(deviceId, true);
   setTimeout(() => { delete _p2pRetrying[deviceId]; }, 8000);
 }
 
-// 中继模式下每5秒尝试切回 P2P
 let _relayRetryTimer = {};
 
 function startP2PRetry(deviceId) {
   clearP2PRetry(deviceId);
-  _relayRetryTimer[deviceId] = setInterval(() => {
-    logToServer('startP2PRetry: 尝试切回P2P deviceId=' + deviceId);
-    if (peerConnections[deviceId]) {
-      cleanupPeerConnection(deviceId);
-    }
-    if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'reconnect-p2p', targetReceiverId: deviceId }));
-    }
-    startP2P(deviceId, true);
-  }, 5000);
+  if (!_onTurnSender || !deviceList[deviceId]) return;
+  _relayRetryTimer[deviceId] = setTimeout(() => {
+    delete _relayRetryTimer[deviceId];
+    if (!_onTurnSender || !deviceList[deviceId]) return;
+    tryReconnectP2P(deviceId);
+  }, P2P_RETRY_INTERVAL_MS);
 }
 
 function clearP2PRetry(deviceId) {
   if (_relayRetryTimer[deviceId]) {
-    clearInterval(_relayRetryTimer[deviceId]);
+    clearTimeout(_relayRetryTimer[deviceId]);
     delete _relayRetryTimer[deviceId];
   }
 }
@@ -704,6 +531,7 @@ function updateDeviceMode(deviceId, mode) {
 }
 
 function cleanupPeerConnection(deviceId) {
+  clearDisconnectTimer(deviceId);
   const pc = peerConnections[deviceId];
   if (pc) {
     pc.close();
@@ -773,7 +601,7 @@ function updateConnCount() {
 }
 
 function stopStreaming() {
-  stopRelay();
+  Object.keys(_relayRetryTimer).forEach(id => clearP2PRetry(id));
   if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
   localAudioTrack = null;
   Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
