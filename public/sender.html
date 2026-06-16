@@ -288,8 +288,8 @@ function startRelay(stream) {
     relayRecorder.onerror = (e) => {
       console.log('[Relay] Recorder error:', e);
     };
-    // 每 100ms 发一次数据，降低延迟
-    relayRecorder.start(100);
+    // 每 250ms 发一次数据（平衡延迟和缓冲）
+    relayRecorder.start(250);
     window._relaySentBytes = 0;
     window._relaySentCount = 0;
     console.log('[Relay] Started at 16kbps, state:', relayRecorder.state);

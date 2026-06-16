@@ -220,10 +220,7 @@ function appendRelayData(buf) {
     relayDebug('queued, q='+relayDataQueue.length);
   }
   if (!relayMode) relayMode = true;
-  const audioEl = document.getElementById('p2pAudio');
-  if (audioEl.paused) {
-    audioEl.play().then(() => relayDebug('play OK')).catch(e => relayDebug('play FAIL: '+e.name));
-  }
+  // Don't call play() on every chunk — MediaSource auto-plays once started
 }
 
 // Clean up relay MediaSource
@@ -702,7 +699,7 @@ function handleWebRTCOffer(msg) {
         // P2P confirmed — switch from relay to P2P
         console.log('[ICE] P2P confirmed, switching from relay to direct');
         _relayDetected = false;
-        if (p2pRemoteStream && !isPlaying) {
+        if (p2pRemoteStream) {
           relayMode = false;
           startPlayback();
         }
