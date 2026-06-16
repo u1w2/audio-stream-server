@@ -613,10 +613,8 @@ function handleWebRTCOffer(msg) {
     // TURN 模式下走中继播放，不处理 P2P 音频 track
     if (_relayDetected) return;
     p2pRemoteStream = e.streams[0];
-    // 强行停止中继，切到 P2P
-    relayMode = false;
-    isPlaying = false;
-    startPlayback();
+    // Don't switch yet — wait for onconnectionstatechange to confirm ICE is connected
+    console.log('[Receiver] ontrack fired, waiting for ICE connection...');
   };
 
   p2pPC.onicecandidate = (e) => {
@@ -651,7 +649,14 @@ function handleWebRTCOffer(msg) {
         // TURN 中继模式隐藏音质选择
         document.getElementById('bitrateControl').classList.add('hidden');
       } else {
-        // 非 relay 状态下再走 getStats 检测兜底
+        // P2P confirmed — switch from relay to P2P
+        console.log('[ICE] P2P confirmed, switching from relay to direct');
+        _relayDetected = false;
+        if (p2pRemoteStream && !isPlaying) {
+          relayMode = false;
+          startPlayback();
+        }
+        // fallback getStats check
         detectRelayMode();
       }
     } else if (state === 'failed' || state === 'disconnected') {
