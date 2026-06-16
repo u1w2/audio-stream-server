@@ -147,7 +147,7 @@ function startRelayP2PCheck() {
       console.log('[Receiver] 中继模式，请求sender尝试P2P');
       ws.send(JSON.stringify({ type: 'p2p-check', receiverId: myReceiverId }));
     }
-  }, 15000);
+  }, 10000);
 }
 function clearRelayP2PCheck() {
   if (_relayP2PCheckTimer) { clearInterval(_relayP2PCheckTimer); _relayP2PCheckTimer = null; }
@@ -176,10 +176,9 @@ function initRelayPlayback() {
         relaySourceBuffer = relayMediaSource.addSourceBuffer('audio/webm;codecs=opus');
         relaySourceBuffer.mode = 'sequence';
         relaySourceBuffer.addEventListener('updateend', () => {
-          // Flush queued data after each append
           if (relayDataQueue.length > 0) {
             const next = relayDataQueue.shift();
-            try { relaySourceBuffer.appendBuffer(next); relayDebug('flush OK, q='+relayDataQueue.length); } catch(_) {}
+            try { relaySourceBuffer.appendBuffer(next); } catch(_) {}
           }
         });
         // Flush initial queue
@@ -210,17 +209,14 @@ function appendRelayData(buf) {
   if (relaySourceBuffer && !relaySourceBuffer.updating) {
     try {
       relaySourceBuffer.appendBuffer(buf);
-      relayDebug('append OK, buf='+buf.byteLength+'b');
+      return;
     } catch(e) {
-      relayDebug('append err: '+e.message);
       relayDataQueue.push(buf);
     }
   } else {
     relayDataQueue.push(buf);
-    relayDebug('queued, q='+relayDataQueue.length);
   }
   if (!relayMode) relayMode = true;
-  // Don't call play() on every chunk — MediaSource auto-plays once started
 }
 
 // Clean up relay MediaSource
@@ -507,8 +503,11 @@ function connectWS() {
     ws.onmessage = (e) => {
       // 二进制数据 = 中继音频
       if (e.data instanceof ArrayBuffer || e.data instanceof Blob) {
+        // Only update counter every ~2s to avoid DOM jank
         window._relayPktCount = (window._relayPktCount || 0) + 1;
-        document.getElementById('playHint').textContent = '中继数据: ' + window._relayPktCount + ' 包';
+        if (window._relayPktCount % 4 === 0) {
+          document.getElementById('playHint').textContent = '中继数据: ' + window._relayPktCount + ' 包';
+        }
         const buf = e.data instanceof ArrayBuffer ? e.data : null;
         if (buf) {
           appendRelayData(buf);

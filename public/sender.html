@@ -281,17 +281,12 @@ function startRelay(stream) {
     relayRecorder.ondataavailable = (e) => {
       if (e.data.size > 0 && ws && ws.readyState === 1) {
         ws.send(e.data);
-        window._relaySentBytes = (window._relaySentBytes || 0) + e.data.size;
-        window._relaySentCount = (window._relaySentCount || 0) + 1;
       }
     };
     relayRecorder.onerror = (e) => {
       console.log('[Relay] Recorder error:', e);
     };
-    // 每 250ms 发一次数据（平衡延迟和缓冲）
-    relayRecorder.start(250);
-    window._relaySentBytes = 0;
-    window._relaySentCount = 0;
+    relayRecorder.start(500);
     console.log('[Relay] Started at 16kbps, state:', relayRecorder.state);
     // 标记所有设备为中继模式
     Object.keys(deviceList).forEach(devId => {
@@ -677,7 +672,7 @@ function tryReconnectP2P(deviceId) {
   setTimeout(() => { delete _p2pRetrying[deviceId]; }, 8000);
 }
 
-// 中继模式下每10秒尝试切回 P2P
+// 中继模式下每5秒尝试切回 P2P
 let _relayRetryTimer = {};
 
 function startP2PRetry(deviceId) {
@@ -691,7 +686,7 @@ function startP2PRetry(deviceId) {
       ws.send(JSON.stringify({ type: 'reconnect-p2p', targetReceiverId: deviceId }));
     }
     startP2P(deviceId, true);
-  }, 10000);
+  }, 5000);
 }
 
 function clearP2PRetry(deviceId) {
