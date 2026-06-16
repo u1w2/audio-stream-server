@@ -197,6 +197,8 @@ wss.on('connection', (ws) => {
       case 'webrtc-ice':
       case 'reconnect-p2p':
       case 'reconnect-relay':
+      case 'p2p-probe-start':
+      case 'p2p-probe-commit':
       case 'connection-lost': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];

@@ -150,7 +150,9 @@ checkSecureContext();
 let _onTurnSender = false;
 const TURN_BITRATE = 16000;
 const P2P_RETRY_INTERVAL_MS = 15000;
-const ICE_DISCONNECTED_GRACE_MS = 2500; // disconnected 后等待 ICE 自恢复
+const P2P_PROBE_TIMEOUT_MS = 20000;
+const P2P_PROBE_FAIL_BACKOFF_MS = 45000;
+const ICE_DISCONNECTED_GRACE_MS = 2500;
 const disconnectTimers = {};
 // 调试日志：通过 WebSocket 发送到服务端
 function logToServer(text) {
@@ -176,10 +178,9 @@ function clearDisconnectTimer(deviceId) {
 }
 
 function handlePeerLost(deviceId, pc) {
-  if (pc._intentionalClose) return;
+  if (pc._intentionalClose || pc._isProbe) return;
   if (!deviceList[deviceId] || !localAudioTrack) return;
   if (peerConnections[deviceId] !== pc) return;
-  delete _p2pProbeActive[deviceId];
   logToServer('连接丢失 useTURN=' + !!pc._useTURN);
   cleanupPeerConnection(deviceId);
   upgradeToTurn(deviceId);
@@ -250,7 +251,6 @@ function enterTurnMode(deviceId, pc) {
 }
 
 function enterP2PMode(deviceId, pc) {
-  delete _p2pProbeActive[deviceId];
   _onTurnSender = false;
   selectedBitrate = 750000;
   applyBitrateToPC(pc, 750000);
@@ -303,7 +303,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V4-fix-p2p-switch 已加载');
+    logToServer('【版本】V5-parallel-p2p-probe 已加载');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -355,22 +355,29 @@ function handleSignaling(msg) {
       updateDeviceList();
       break;
 
-    case 'webrtc-answer':
-      if (msg.receiverId && peerConnections[msg.receiverId]) {
-        peerConnections[msg.receiverId].setRemoteDescription(new RTCSessionDescription(msg.sdp))
-          .catch(() => {});
+    case 'webrtc-answer': {
+      const pc = msg.isProbe
+        ? probeConnections[msg.receiverId]
+        : peerConnections[msg.receiverId];
+      if (pc) {
+        pc.setRemoteDescription(new RTCSessionDescription(msg.sdp)).catch(() => {});
       }
       break;
+    }
 
-    case 'webrtc-ice':
-      if (msg.receiverId && peerConnections[msg.receiverId]) {
-        peerConnections[msg.receiverId].addIceCandidate(new RTCIceCandidate(msg.candidate))
-          .catch(() => {});
+    case 'webrtc-ice': {
+      const pc = msg.isProbe
+        ? probeConnections[msg.receiverId]
+        : peerConnections[msg.receiverId];
+      if (pc) {
+        pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).catch(() => {});
       }
       break;
+    }
 
     case 'peer-left': {
       if (msg.receiverId && deviceList[msg.receiverId]) {
+        cleanupProbeConnection(msg.receiverId);
         cleanupPeerConnection(msg.receiverId);
         delete deviceList[msg.receiverId];
       } else {
@@ -392,6 +399,7 @@ function handleSignaling(msg) {
     }
 
     case 'peer-disconnected':
+      Object.keys(probeConnections).forEach(id => cleanupProbeConnection(id));
       Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
       deviceList = {};
       deviceCounter = 0;
@@ -420,8 +428,8 @@ function handleSignaling(msg) {
 
     case 'connection-lost':
       if (msg.receiverId && deviceList[msg.receiverId]) {
-        if (_p2pProbeActive[msg.receiverId]) {
-          logToServer('忽略 connection-lost（P2P 探测中）');
+        if (probeConnections[msg.receiverId]) {
+          logToServer('忽略 connection-lost（P2P 并行探测中）');
           break;
         }
         logToServer('receiver 报告连接丢失');
@@ -439,12 +447,22 @@ function handleSignaling(msg) {
 
 // --- WebRTC P2P ---
 
-function createPC(deviceId, useTURN) {
-  const servers = useTURN ? ICE_SERVERS : [{ urls: 'stun:stun.qq.com:3478' }, { urls: 'stun:stun.aliyun.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }];
-  const pc = new RTCPeerConnection({ iceServers: servers });
-  peerConnections[deviceId] = pc;
+const STUN_SERVERS = [
+  { urls: 'stun:stun.qq.com:3478' },
+  { urls: 'stun:stun.aliyun.com:3478' },
+  { urls: 'stun:stun.l.google.com:19302' },
+];
 
-  // 添加音频轨道
+function createPC(deviceId, useTURN, isProbe) {
+  const servers = useTURN ? ICE_SERVERS : STUN_SERVERS;
+  const pc = new RTCPeerConnection({ iceServers: servers });
+  if (isProbe) {
+    probeConnections[deviceId] = pc;
+    pc._isProbe = true;
+  } else {
+    peerConnections[deviceId] = pc;
+  }
+
   if (localAudioTrack) {
     pc.addTrack(localAudioTrack, audioStream || new MediaStream([localAudioTrack]));
   }
@@ -455,18 +473,27 @@ function createPC(deviceId, useTURN) {
 
   pc.onicecandidate = (e) => {
     if (e.candidate && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'webrtc-ice', targetReceiverId: deviceId, candidate: e.candidate.toJSON() }));
+      ws.send(JSON.stringify({
+        type: 'webrtc-ice',
+        targetReceiverId: deviceId,
+        isProbe: !!isProbe,
+        candidate: e.candidate.toJSON(),
+      }));
     }
   };
 
-  bindIceHandlers(deviceId, pc, useTURN);
+  if (isProbe) {
+    bindProbeIceHandlers(deviceId, pc);
+  } else {
+    bindIceHandlers(deviceId, pc, useTURN);
+  }
   pc._useTURN = useTURN;
   return pc;
 }
 
 function upgradeToTurn(deviceId) {
   if (!deviceList[deviceId] || peerConnections[deviceId]) return;
-  if (_p2pProbeActive[deviceId]) return;
+  if (probeConnections[deviceId]) return;
   logToServer('升级 TURN deviceId=' + deviceId);
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
@@ -485,45 +512,182 @@ function upgradeToTurn(deviceId) {
   }).catch(() => cleanupPeerConnection(deviceId));
 }
 
-function startP2P(deviceId, fromRetry) {
+function startP2P(deviceId) {
   if (peerConnections[deviceId]) return;
-  const pc = createPC(deviceId, false);
+  const pc = createPC(deviceId, false, false);
   if (!pc) return;
-  pc._fromRetry = !!fromRetry;
 
   pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
     if (ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'webrtc-offer', targetReceiverId: deviceId, useTURN: false, sdp: pc.localDescription.toJSON() }));
+      ws.send(JSON.stringify({
+        type: 'webrtc-offer',
+        targetReceiverId: deviceId,
+        useTURN: false,
+        sdp: pc.localDescription.toJSON(),
+      }));
     }
   }).catch(() => cleanupPeerConnection(deviceId));
 }
 
 let _p2pRetrying = {};
-let _p2pProbeActive = {};
+let probeConnections = {};
+let probeTimeouts = {};
+let probeVerifyTimers = {};
+let probeFailBackoff = {};
+
+function clearProbeTimeout(deviceId) {
+  if (probeTimeouts[deviceId]) {
+    clearTimeout(probeTimeouts[deviceId]);
+    delete probeTimeouts[deviceId];
+  }
+}
+
+function clearProbeVerifyTimer(deviceId) {
+  if (probeVerifyTimers[deviceId]) {
+    clearTimeout(probeVerifyTimers[deviceId]);
+    delete probeVerifyTimers[deviceId];
+  }
+}
+
+function cleanupProbeConnection(deviceId) {
+  clearProbeTimeout(deviceId);
+  clearProbeVerifyTimer(deviceId);
+  const pc = probeConnections[deviceId];
+  if (pc) {
+    pc._intentionalClose = true;
+    pc.close();
+    delete probeConnections[deviceId];
+  }
+}
+
+function bindProbeIceHandlers(deviceId, pc) {
+  pc.oniceconnectionstatechange = () => {
+    const ice = pc.iceConnectionState;
+    logToServer('probe ice=' + ice);
+    if (ice === 'connected' || ice === 'completed') {
+      verifyProbeMedia(deviceId, pc);
+    } else if (ice === 'failed') {
+      failProbe(deviceId, 'ICE failed');
+    }
+  };
+}
+
+async function verifyProbeMedia(deviceId, pc) {
+  if (pc._verifying || pc._verified) return;
+  if (probeConnections[deviceId] !== pc) return;
+  pc._verifying = true;
+
+  let lastBytes = 0;
+  let stableCount = 0;
+  let checks = 0;
+
+  const check = async () => {
+    if (probeConnections[deviceId] !== pc) return;
+    const ice = pc.iceConnectionState;
+    if (ice !== 'connected' && ice !== 'completed') {
+      pc._verifying = false;
+      return;
+    }
+
+    checks++;
+    try {
+      const stats = await pc.getStats();
+      let bytes = 0;
+      let hasRelay = false;
+      stats.forEach(report => {
+        if (report.type === 'outbound-rtp' && report.kind === 'audio') {
+          bytes = report.bytesSent || 0;
+        }
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          if (report.localCandidateType === 'relay' || report.remoteCandidateType === 'relay') {
+            hasRelay = true;
+          }
+        }
+      });
+
+      if (hasRelay) {
+        failProbe(deviceId, 'probe 仍走 relay');
+        return;
+      }
+      if (bytes > lastBytes) {
+        stableCount++;
+        lastBytes = bytes;
+      }
+      if (stableCount >= 2) {
+        commitProbeSwitch(deviceId, pc);
+        return;
+      }
+    } catch (_) {}
+
+    if (checks >= 8) {
+      failProbe(deviceId, 'probe 无媒体流');
+      return;
+    }
+    probeVerifyTimers[deviceId] = setTimeout(check, 1000);
+  };
+
+  check();
+}
+
+function commitProbeSwitch(deviceId, probePc) {
+  if (probeConnections[deviceId] !== probePc || probePc._verified) return;
+  probePc._verified = true;
+  clearProbeTimeout(deviceId);
+  clearProbeVerifyTimer(deviceId);
+  logToServer('P2P 探测成功，切换 deviceId=' + deviceId);
+
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'p2p-probe-commit', targetReceiverId: deviceId }));
+  }
+
+  cleanupPeerConnection(deviceId, true);
+  delete probeConnections[deviceId];
+  probePc._isProbe = false;
+  peerConnections[deviceId] = probePc;
+  bindIceHandlers(deviceId, probePc, false);
+  enterP2PMode(deviceId, probePc);
+}
+
+function failProbe(deviceId, reason) {
+  logToServer(reason + ' deviceId=' + deviceId);
+  cleanupProbeConnection(deviceId);
+  probeFailBackoff[deviceId] = Date.now() + P2P_PROBE_FAIL_BACKOFF_MS;
+  startP2PRetry(deviceId);
+}
 
 function tryReconnectP2P(deviceId) {
   if (!deviceList[deviceId] || !localAudioTrack || _p2pRetrying[deviceId]) return;
+  const mainPc = peerConnections[deviceId];
+  if (!mainPc || !mainPc._useTURN) return;
+  if (probeConnections[deviceId]) return;
+  if (probeFailBackoff[deviceId] && Date.now() < probeFailBackoff[deviceId]) return;
+
   _p2pRetrying[deviceId] = true;
-  _p2pProbeActive[deviceId] = true;
-  logToServer('探测 P2P deviceId=' + deviceId);
+  logToServer('并行探测 P2P deviceId=' + deviceId);
+
   if (ws && ws.readyState === 1) {
-    ws.send(JSON.stringify({ type: 'reconnect-p2p', targetReceiverId: deviceId }));
+    ws.send(JSON.stringify({ type: 'p2p-probe-start', targetReceiverId: deviceId }));
   }
-  if (peerConnections[deviceId]) cleanupPeerConnection(deviceId, true);
-  startP2P(deviceId, true);
-  setTimeout(() => { delete _p2pRetrying[deviceId]; }, 8000);
-  setTimeout(() => {
-    if (!_p2pProbeActive[deviceId]) return;
-    const pc = peerConnections[deviceId];
-    if (pc && !pc._useTURN && ['connected', 'completed'].includes(pc.iceConnectionState)) {
-      delete _p2pProbeActive[deviceId];
-      return;
+
+  const probePc = createPC(deviceId, false, true);
+  probePc.createOffer().then(offer => probePc.setLocalDescription(offer)).then(() => {
+    if (ws.readyState === 1) {
+      ws.send(JSON.stringify({
+        type: 'webrtc-offer',
+        targetReceiverId: deviceId,
+        useTURN: false,
+        isProbe: true,
+        sdp: probePc.localDescription.toJSON(),
+      }));
     }
-    delete _p2pProbeActive[deviceId];
-    logToServer('P2P 探测超时，回退 TURN deviceId=' + deviceId);
-    if (pc) cleanupPeerConnection(deviceId, true);
-    upgradeToTurn(deviceId);
-  }, 12000);
+  }).catch(() => failProbe(deviceId, 'probe offer 失败'));
+
+  clearProbeTimeout(deviceId);
+  probeTimeouts[deviceId] = setTimeout(() => {
+    if (probeConnections[deviceId]) failProbe(deviceId, 'P2P 探测超时');
+  }, P2P_PROBE_TIMEOUT_MS);
+
+  setTimeout(() => { delete _p2pRetrying[deviceId]; }, 8000);
 }
 
 let _relayRetryTimer = {};
@@ -531,11 +695,16 @@ let _relayRetryTimer = {};
 function startP2PRetry(deviceId) {
   clearP2PRetry(deviceId);
   if (!_onTurnSender || !deviceList[deviceId]) return;
+  if (probeConnections[deviceId]) return;
+  let delay = P2P_RETRY_INTERVAL_MS;
+  if (probeFailBackoff[deviceId] && Date.now() < probeFailBackoff[deviceId]) {
+    delay = probeFailBackoff[deviceId] - Date.now();
+  }
   _relayRetryTimer[deviceId] = setTimeout(() => {
     delete _relayRetryTimer[deviceId];
     if (!_onTurnSender || !deviceList[deviceId]) return;
     tryReconnectP2P(deviceId);
-  }, P2P_RETRY_INTERVAL_MS);
+  }, delay);
 }
 
 function clearP2PRetry(deviceId) {
@@ -625,6 +794,7 @@ function updateConnCount() {
 
 function stopStreaming() {
   Object.keys(_relayRetryTimer).forEach(id => clearP2PRetry(id));
+  Object.keys(probeConnections).forEach(id => cleanupProbeConnection(id));
   if (audioStream) { audioStream.getTracks().forEach(t => t.stop()); audioStream = null; }
   localAudioTrack = null;
   Object.keys(peerConnections).forEach(id => cleanupPeerConnection(id));
