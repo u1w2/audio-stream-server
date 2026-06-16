@@ -192,19 +192,31 @@ function cleanupTurnProbePC() {
 }
 
 function promoteTurnProbeConnection() {
-  if (!turnProbePC || !turnProbeRemoteStream) return;
+  if (!turnProbePC) return;
   _reconnecting = false;
+  stopMediaWatchdog();
   closePCIntentionally();
   p2pPC = turnProbePC;
   turnProbePC = null;
-  p2pRemoteStream = turnProbeRemoteStream;
-  turnProbeRemoteStream = null;
   pendingCandidates = turnProbePendingCandidates;
   turnProbePendingCandidates = [];
   _lastOfferUseTURN = true;
-  bindReceiverIceHandlers(p2pPC, true);
-  startPlayback(true);
-  console.log('[Receiver] TURN 探测成功，已切换');
+
+  const beginTurnPlayback = (stream) => {
+    p2pRemoteStream = stream;
+    turnProbeRemoteStream = null;
+    bindReceiverIceHandlers(p2pPC, true);
+    startPlayback(true);
+    console.log('[Receiver] TURN 探测成功，已切换');
+  };
+
+  if (turnProbeRemoteStream) {
+    beginTurnPlayback(turnProbeRemoteStream);
+  } else {
+    p2pPC.ontrack = (e) => {
+      beginTurnPlayback(e.streams[0] || new MediaStream([e.track]));
+    };
+  }
 }
 
 function promoteProbeConnection() {
@@ -224,6 +236,59 @@ function promoteProbeConnection() {
 }
 
 let _reconnecting = false;
+let _mediaWatchTimer = null;
+
+function stopMediaWatchdog() {
+  if (_mediaWatchTimer) {
+    clearTimeout(_mediaWatchTimer);
+    _mediaWatchTimer = null;
+  }
+}
+
+function startMediaWatchdog() {
+  stopMediaWatchdog();
+  if (_onTurn || turnProbePC) return;
+
+  let lastBytes = 0;
+  let silentChecks = 0;
+  let checks = 0;
+
+  const check = async () => {
+    if (_onTurn || turnProbePC || !p2pPC) return;
+    const ice = p2pPC.iceConnectionState;
+    if (ice !== 'connected' && ice !== 'completed') return;
+
+    checks++;
+    try {
+      const stats = await p2pPC.getStats();
+      let bytes = 0;
+      stats.forEach(report => {
+        if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+          bytes = report.bytesReceived || 0;
+        }
+      });
+      if (bytes > lastBytes) {
+        stopMediaWatchdog();
+        return;
+      }
+      silentChecks++;
+      if (silentChecks >= 4) {
+        document.getElementById('playHint').textContent = 'P2P 无声音，切换 TURN...';
+        setStatus('buffering', '切换 TURN...');
+        if (ws && ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'p2p-no-media', receiverId: myReceiverId }));
+        }
+        return;
+      }
+    } catch (_) {}
+
+    if (checks < 16) {
+      _mediaWatchTimer = setTimeout(check, 500);
+    }
+  };
+
+  _mediaWatchTimer = setTimeout(check, 1000);
+}
 
 function clearReceiverDisconnectTimer() {
   if (_receiverDisconnectTimer) {
@@ -545,6 +610,8 @@ function handleSignaling(msg) {
 
     case 'turn-probe-start':
       console.log('[Receiver] sender 并行探测 TURN，P2P 主连接保持播放');
+      document.getElementById('playHint').textContent = '正在切换 TURN...';
+      setStatus('buffering', '切换 TURN...');
       break;
 
     case 'turn-probe-commit':
@@ -781,10 +848,13 @@ function startPlayback(isTurn) {
   doPlay();
 
   isPlaying = true;
+  if (!isTurn) startMediaWatchdog();
+  else stopMediaWatchdog();
 }
 
 function stopPlayback() {
   clearReceiverDisconnectTimer();
+  stopMediaWatchdog();
   cleanupProbePC();
   cleanupTurnProbePC();
   const audioEl = document.getElementById('p2pAudio');

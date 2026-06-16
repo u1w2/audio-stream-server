@@ -198,12 +198,15 @@ function bindIceHandlers(deviceId, pc, useTURN) {
 
     if (ice === 'connected' || ice === 'completed') {
       clearDisconnectTimer(deviceId);
-      if (!useTURN) cleanupTurnProbeConnection(deviceId);
-      updateDeviceMode(deviceId, useTURN ? 'turn' : 'p2p');
+      clearP2pMediaVerifyTimer(deviceId);
       if (useTURN) {
+        cleanupTurnProbeConnection(deviceId);
+        updateDeviceMode(deviceId, 'turn');
         enterTurnMode(deviceId, pc);
       } else {
-        enterP2PMode(deviceId, pc);
+        cleanupTurnProbeConnection(deviceId);
+        updateDeviceMode(deviceId, 'connecting');
+        verifyMainP2PMedia(deviceId, pc);
       }
     } else if (ice === 'failed') {
       clearDisconnectTimer(deviceId);
@@ -310,7 +313,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6-parallel-turn-probe 已加载');
+    logToServer('【版本】V6.1-p2p-media-verify 已加载');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -428,6 +431,13 @@ function handleSignaling(msg) {
     }
 
     case 'p2p-check':
+      break;
+
+    case 'p2p-no-media':
+      if (msg.receiverId && deviceList[msg.receiverId]) {
+        logToServer('receiver 报告 P2P 无媒体，启动 TURN 探测');
+        startTurnProbe(msg.receiverId);
+      }
       break;
 
     case 'connection-lost':
@@ -590,6 +600,72 @@ let probeVerifyTimers = {};
 let turnProbeVerifyTimers = {};
 let probeFailBackoff = {};
 let _turnProbeRetrying = {};
+let p2pMediaVerifyTimers = {};
+
+function clearP2pMediaVerifyTimer(deviceId) {
+  if (p2pMediaVerifyTimers[deviceId]) {
+    clearTimeout(p2pMediaVerifyTimers[deviceId]);
+    delete p2pMediaVerifyTimers[deviceId];
+  }
+}
+
+async function verifyMainP2PMedia(deviceId, pc) {
+  if (pc._p2pVerified || pc._useTURN) return;
+  if (peerConnections[deviceId] !== pc) return;
+
+  let lastBytes = 0;
+  let stableCount = 0;
+  let checks = 0;
+
+  const check = async () => {
+    if (peerConnections[deviceId] !== pc || pc._useTURN) return;
+    const ice = pc.iceConnectionState;
+    if (ice !== 'connected' && ice !== 'completed') return;
+
+    checks++;
+    try {
+      const stats = await pc.getStats();
+      let bytes = 0;
+      let hasRelay = false;
+      stats.forEach(report => {
+        if (report.type === 'outbound-rtp' && report.kind === 'audio') {
+          bytes = report.bytesSent || 0;
+        }
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          if (report.localCandidateType === 'relay' || report.remoteCandidateType === 'relay') {
+            hasRelay = true;
+          }
+        }
+      });
+
+      if (hasRelay) {
+        logToServer('P2P 实际走 relay，启动 TURN 探测');
+        startTurnProbe(deviceId);
+        return;
+      }
+
+      if (bytes > lastBytes) {
+        stableCount++;
+        lastBytes = bytes;
+      }
+      if (stableCount >= 2) {
+        pc._p2pVerified = true;
+        updateDeviceMode(deviceId, 'p2p');
+        enterP2PMode(deviceId, pc);
+        return;
+      }
+    } catch (_) {}
+
+    if (checks >= 6) {
+      logToServer('P2P 无媒体流，启动 TURN 探测');
+      startTurnProbe(deviceId);
+      return;
+    }
+    p2pMediaVerifyTimers[deviceId] = setTimeout(check, 500);
+  };
+
+  check();
+}
 
 function clearTurnProbeTimeout(deviceId) {
   if (turnProbeTimeouts[deviceId]) {
@@ -733,7 +809,9 @@ function failTurnProbe(deviceId, reason) {
   logToServer(reason + ' deviceId=' + deviceId);
   cleanupTurnProbeConnection(deviceId);
   const mainPc = peerConnections[deviceId];
-  if (mainPc && !mainPc._useTURN) return;
+  if (mainPc && !mainPc._useTURN) {
+    cleanupPeerConnection(deviceId, true);
+  }
   createDirectTurn(deviceId);
 }
 
@@ -782,20 +860,22 @@ async function verifyTurnProbeMedia(deviceId, pc) {
         }
       });
 
-      if (!hasRelay) {
-        if (checks >= 6) {
-          failTurnProbe(deviceId, 'TURN probe 未走 relay');
+      if (hasRelay) {
+        if (bytes > lastBytes) stableCount++;
+        lastBytes = Math.max(lastBytes, bytes);
+        if (stableCount >= 2 || checks >= 5) {
+          commitTurnProbeSwitch(deviceId, pc);
           return;
         }
         turnProbeVerifyTimers[deviceId] = setTimeout(check, 500);
         return;
       }
-      if (bytes > lastBytes) {
-        stableCount++;
-        lastBytes = bytes;
-      }
-      if (stableCount >= 2) {
-        commitTurnProbeSwitch(deviceId, pc);
+      if (!hasRelay) {
+        if (checks >= 8) {
+          failTurnProbe(deviceId, 'TURN probe 未走 relay');
+          return;
+        }
+        turnProbeVerifyTimers[deviceId] = setTimeout(check, 500);
         return;
       }
     } catch (_) {}
@@ -832,8 +912,13 @@ function commitTurnProbeSwitch(deviceId, probePc) {
 function startTurnProbe(deviceId) {
   if (!deviceList[deviceId] || !localAudioTrack || _turnProbeRetrying[deviceId]) return;
   const mainPc = peerConnections[deviceId];
-  if (!mainPc || mainPc._useTURN) return;
+  if (mainPc && mainPc._useTURN) return;
   if (turnProbeConnections[deviceId]) return;
+
+  if (!mainPc) {
+    createDirectTurn(deviceId);
+    return;
+  }
 
   _turnProbeRetrying[deviceId] = true;
   logToServer('并行探测 TURN deviceId=' + deviceId);
@@ -945,9 +1030,13 @@ function migrateDeviceId(oldId, newId) {
   rekeyDeviceMap(disconnectTimers, oldId, newId);
   rekeyDeviceMap(_relayRetryTimer, oldId, newId);
   rekeyDeviceMap(probeTimeouts, oldId, newId);
+  rekeyDeviceMap(turnProbeTimeouts, oldId, newId);
   rekeyDeviceMap(probeVerifyTimers, oldId, newId);
+  rekeyDeviceMap(turnProbeVerifyTimers, oldId, newId);
   rekeyDeviceMap(probeFailBackoff, oldId, newId);
   rekeyDeviceMap(_p2pRetrying, oldId, newId);
+  rekeyDeviceMap(_turnProbeRetrying, oldId, newId);
+  rekeyDeviceMap(p2pMediaVerifyTimers, oldId, newId);
 }
 
 function registerDevice(devId, serverCount) {
@@ -984,6 +1073,7 @@ function registerDevice(devId, serverCount) {
 
 function cleanupPeerConnection(deviceId, intentional) {
   clearDisconnectTimer(deviceId);
+  clearP2pMediaVerifyTimer(deviceId);
   const pc = peerConnections[deviceId];
   if (pc) {
     if (intentional) pc._intentionalClose = true;
