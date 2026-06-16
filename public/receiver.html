@@ -154,10 +154,16 @@ function setTurnUI(on) {
 
 function notifyNetworkChanged() {
   if (!roomCode || !myReceiverId) return;
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'network-changed', receiverId: myReceiverId }));
-  }
+  if (_networkChangeTimer) clearTimeout(_networkChangeTimer);
+  _networkChangeTimer = setTimeout(() => {
+    _networkChangeTimer = null;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'network-changed', receiverId: myReceiverId }));
+    }
+  }, 400);
 }
+
+let _networkChangeTimer = null;
 
 function notifyConnectionLost() {
   if (_reconnecting || probePC || turnProbePC) return;
@@ -713,6 +719,40 @@ function handleWebRTCOffer(msg) {
     return;
   }
 
+  const useTurn = !!msg.useTURN;
+
+  if (msg.iceRestart && p2pPC && !useTurn && !_lastOfferUseTURN) {
+    _reconnecting = false;
+    _lastOfferUseTURN = false;
+    console.log('[Receiver] ICE restart 重协商');
+    document.getElementById('playHint').textContent = '网络切换，重连中...';
+    setStatus('buffering', '重连中...');
+
+    const flushPendingCandidates = () => {
+      pendingCandidates.forEach(c => {
+        p2pPC.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
+      });
+      pendingCandidates = [];
+    };
+
+    p2pPC.setRemoteDescription(new RTCSessionDescription(msg.sdp)).then(() => {
+      flushPendingCandidates();
+      return p2pPC.createAnswer();
+    }).then(answer => p2pPC.setLocalDescription(answer)).then(() => {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({
+          type: 'webrtc-answer',
+          receiverId: myReceiverId,
+          sdp: p2pPC.localDescription.toJSON(),
+        }));
+      }
+    }).catch(() => {
+      closePCIntentionally();
+      notifyNetworkChanged();
+    });
+    return;
+  }
+
   if (p2pPC) {
     closePCIntentionally();
     isPlaying = false;
@@ -720,7 +760,6 @@ function handleWebRTCOffer(msg) {
 
   _reconnecting = false;
 
-  const useTurn = !!msg.useTURN;
   const pcConfig = useTurn
     ? { iceServers: ICE_SERVERS, iceTransportPolicy: 'relay' }
     : { iceServers: STUN_SERVERS };
