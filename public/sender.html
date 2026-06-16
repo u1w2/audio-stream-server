@@ -176,8 +176,10 @@ function clearDisconnectTimer(deviceId) {
 }
 
 function handlePeerLost(deviceId, pc) {
+  if (pc._intentionalClose) return;
   if (!deviceList[deviceId] || !localAudioTrack) return;
   if (peerConnections[deviceId] !== pc) return;
+  delete _p2pProbeActive[deviceId];
   logToServer('连接丢失 useTURN=' + !!pc._useTURN);
   cleanupPeerConnection(deviceId);
   upgradeToTurn(deviceId);
@@ -248,6 +250,7 @@ function enterTurnMode(deviceId, pc) {
 }
 
 function enterP2PMode(deviceId, pc) {
+  delete _p2pProbeActive[deviceId];
   _onTurnSender = false;
   selectedBitrate = 750000;
   applyBitrateToPC(pc, 750000);
@@ -300,7 +303,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V3-event-driven 已加载');
+    logToServer('【版本】V4-fix-p2p-switch 已加载');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -417,9 +420,13 @@ function handleSignaling(msg) {
 
     case 'connection-lost':
       if (msg.receiverId && deviceList[msg.receiverId]) {
+        if (_p2pProbeActive[msg.receiverId]) {
+          logToServer('忽略 connection-lost（P2P 探测中）');
+          break;
+        }
         logToServer('receiver 报告连接丢失');
         const pc = peerConnections[msg.receiverId];
-        if (pc) cleanupPeerConnection(msg.receiverId);
+        if (pc) cleanupPeerConnection(msg.receiverId, true);
         upgradeToTurn(msg.receiverId);
       }
       break;
@@ -459,6 +466,7 @@ function createPC(deviceId, useTURN) {
 
 function upgradeToTurn(deviceId) {
   if (!deviceList[deviceId] || peerConnections[deviceId]) return;
+  if (_p2pProbeActive[deviceId]) return;
   logToServer('升级 TURN deviceId=' + deviceId);
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'reconnect-relay', targetReceiverId: deviceId }));
@@ -491,17 +499,31 @@ function startP2P(deviceId, fromRetry) {
 }
 
 let _p2pRetrying = {};
+let _p2pProbeActive = {};
 
 function tryReconnectP2P(deviceId) {
   if (!deviceList[deviceId] || !localAudioTrack || _p2pRetrying[deviceId]) return;
   _p2pRetrying[deviceId] = true;
+  _p2pProbeActive[deviceId] = true;
   logToServer('探测 P2P deviceId=' + deviceId);
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({ type: 'reconnect-p2p', targetReceiverId: deviceId }));
   }
-  if (peerConnections[deviceId]) cleanupPeerConnection(deviceId);
+  if (peerConnections[deviceId]) cleanupPeerConnection(deviceId, true);
   startP2P(deviceId, true);
   setTimeout(() => { delete _p2pRetrying[deviceId]; }, 8000);
+  setTimeout(() => {
+    if (!_p2pProbeActive[deviceId]) return;
+    const pc = peerConnections[deviceId];
+    if (pc && !pc._useTURN && ['connected', 'completed'].includes(pc.iceConnectionState)) {
+      delete _p2pProbeActive[deviceId];
+      return;
+    }
+    delete _p2pProbeActive[deviceId];
+    logToServer('P2P 探测超时，回退 TURN deviceId=' + deviceId);
+    if (pc) cleanupPeerConnection(deviceId, true);
+    upgradeToTurn(deviceId);
+  }, 12000);
 }
 
 let _relayRetryTimer = {};
@@ -530,10 +552,11 @@ function updateDeviceMode(deviceId, mode) {
   }
 }
 
-function cleanupPeerConnection(deviceId) {
+function cleanupPeerConnection(deviceId, intentional) {
   clearDisconnectTimer(deviceId);
   const pc = peerConnections[deviceId];
   if (pc) {
+    if (intentional) pc._intentionalClose = true;
     pc.close();
     delete peerConnections[deviceId];
   }

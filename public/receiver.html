@@ -142,6 +142,7 @@ function setTurnUI(on) {
 }
 
 function notifyConnectionLost() {
+  if (_reconnecting) return;
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({
       type: 'connection-lost',
@@ -150,6 +151,18 @@ function notifyConnectionLost() {
     }));
   }
 }
+
+function closePCIntentionally() {
+  clearReceiverDisconnectTimer();
+  if (!p2pPC) return;
+  p2pPC._intentionalClose = true;
+  p2pPC.close();
+  p2pPC = null;
+  p2pRemoteStream = null;
+  pendingCandidates = [];
+}
+
+let _reconnecting = false;
 
 function clearReceiverDisconnectTimer() {
   if (_receiverDisconnectTimer) {
@@ -160,15 +173,22 @@ function clearReceiverDisconnectTimer() {
 
 function bindReceiverIceHandlers(pc, useTurn) {
   pc.oniceconnectionstatechange = () => {
+    if (pc._intentionalClose) return;
     const ice = pc.iceConnectionState;
     console.log('[Receiver] ice=' + ice);
 
     if (ice === 'connected' || ice === 'completed') {
       clearReceiverDisconnectTimer();
-      setTurnUI(!!useTurn || _lastOfferUseTURN);
-      if (!useTurn && !_lastOfferUseTURN) detectRelayMode();
+      _reconnecting = false;
+      const isTurn = !!(useTurn || _lastOfferUseTURN);
+      setTurnUI(isTurn);
+      if (!isTurn) {
+        detectRelayMode();
+        if (p2pRemoteStream) startPlayback(false);
+      }
     } else if (ice === 'failed') {
       clearReceiverDisconnectTimer();
+      _reconnecting = false;
       notifyConnectionLost();
       document.getElementById('playHint').textContent = '连接断开，等待重连...';
       setStatus('buffering', '重连中...');
@@ -179,6 +199,7 @@ function bindReceiverIceHandlers(pc, useTurn) {
         if (!p2pPC || p2pPC !== pc) return;
         const current = pc.iceConnectionState;
         if (current === 'disconnected' || current === 'failed') {
+          _reconnecting = false;
           notifyConnectionLost();
           document.getElementById('playHint').textContent = '连接断开，等待重连...';
           setStatus('buffering', '重连中...');
@@ -188,6 +209,7 @@ function bindReceiverIceHandlers(pc, useTurn) {
   };
 
   pc.onconnectionstatechange = () => {
+    if (pc._intentionalClose) return;
     if (pc.connectionState === 'failed') {
       clearReceiverDisconnectTimer();
       notifyConnectionLost();
@@ -446,17 +468,19 @@ function handleSignaling(msg) {
 
     case 'reconnect-p2p':
       console.log('[Receiver] sender 探测 P2P，等待新 offer');
-      if (p2pPC) { p2pPC.close(); p2pPC = null; }
-      pendingCandidates = [];
+      _reconnecting = true;
+      closePCIntentionally();
       _lastOfferUseTURN = false;
+      document.getElementById('playHint').textContent = '正在切换 P2P...';
       break;
 
     case 'reconnect-relay':
       console.log('[Receiver] 切换到 TURN，等待新 offer');
-      if (p2pPC) { p2pPC.close(); p2pPC = null; }
-      pendingCandidates = [];
+      _reconnecting = true;
+      closePCIntentionally();
       _lastOfferUseTURN = true;
       setTurnUI(true);
+      document.getElementById('playHint').textContent = '正在切换 TURN...';
       break;
 
     case 'webrtc-offer':
@@ -488,8 +512,7 @@ function handleSignaling(msg) {
 // --- WebRTC: Handle incoming offer from sender ---
 function handleWebRTCOffer(msg) {
   if (p2pPC) {
-    p2pPC.close();
-    p2pPC = null;
+    closePCIntentionally();
     isPlaying = false;
   }
 
