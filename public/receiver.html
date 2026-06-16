@@ -187,6 +187,11 @@ function notifyNetworkChanged() {
 
 let _networkChangeTimer = null;
 let _roomBroadcast = null;
+let _suppressConnectionLostUntil = 0;
+
+function suppressConnectionLost(ms) {
+  _suppressConnectionLostUntil = Math.max(_suppressConnectionLostUntil, Date.now() + ms);
+}
 
 function setupRoomBroadcast(code) {
   if (!('BroadcastChannel' in window) || !code) return;
@@ -210,6 +215,7 @@ function setupRoomBroadcast(code) {
 }
 
 function notifyConnectionLost() {
+  if (Date.now() < _suppressConnectionLostUntil) return;
   if (_reconnecting || probePC || turnProbePC) return;
   if (ws && ws.readyState === 1) {
     ws.send(JSON.stringify({
@@ -277,8 +283,36 @@ function promoteTurnProbeConnection() {
 }
 
 function promoteProbeConnection() {
-  if (!probePC || !probeRemoteStream) return;
+  if (!probePC) {
+    logToServer('p2p-probe-commit 但 probePC 不存在', 'media');
+    return;
+  }
+
+  if (!probeRemoteStream) {
+    const audioTracks = probePC.getReceivers()
+      .map(r => r.track)
+      .filter(t => t && t.kind === 'audio');
+    if (audioTracks.length > 0) {
+      probeRemoteStream = new MediaStream(audioTracks);
+      logToServer('p2p-probe-commit 从 getReceivers 恢复音频流', 'media');
+    } else {
+      logToServer('p2p-probe-commit 等待 ontrack', 'media');
+      const waitingPc = probePC;
+      waitingPc.ontrack = (e) => {
+        if (probePC !== waitingPc) return;
+        probeRemoteStream = e.streams[0] || new MediaStream([e.track]);
+        promoteProbeConnection();
+      };
+      setTimeout(() => {
+        if (probePC === waitingPc && !p2pPC) promoteProbeConnection();
+      }, 2500);
+      return;
+    }
+  }
+
   _reconnecting = false;
+  suppressConnectionLost(5000);
+  stopMediaWatchdog();
   closePCIntentionally();
   p2pPC = probePC;
   probePC = null;
@@ -288,8 +322,8 @@ function promoteProbeConnection() {
   probePendingCandidates = [];
   _lastOfferUseTURN = false;
   bindReceiverIceHandlers(p2pPC, false);
+  logToServer('P2P 探测切换完成，开始播放', 'media');
   startPlayback(false);
-  console.log('[Receiver] P2P 探测成功，已切换');
 }
 
 let _reconnecting = false;
@@ -647,7 +681,7 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'joined': {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.8-offer-recover joined id=' + myReceiverId, 'version');
+      logToServer('【版本】V6.9-p2p-playback joined id=' + myReceiverId, 'version');
       document.getElementById('playHint').textContent = '等待音频...';
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
@@ -703,6 +737,7 @@ function handleSignaling(msg) {
 
     case 'reconnect-p2p':
       console.log('[Receiver] sender 请求 P2P 重连');
+      suppressConnectionLost(5000);
       _reconnecting = true;
       stopMediaWatchdog();
       cleanupProbePC();
@@ -716,6 +751,7 @@ function handleSignaling(msg) {
 
     case 'force-rejoin':
       logToServer('sender 要求恢复会话 force-rejoin', 'recover');
+      suppressConnectionLost(5000);
       stopMediaWatchdog();
       cleanupProbePC();
       cleanupTurnProbePC();
@@ -731,6 +767,7 @@ function handleSignaling(msg) {
 
     case 'reconnect-relay':
       console.log('[Receiver] 直接切换 TURN（无并行探测）');
+      suppressConnectionLost(6000);
       _reconnecting = true;
       closePCIntentionally();
       _lastOfferUseTURN = true;
