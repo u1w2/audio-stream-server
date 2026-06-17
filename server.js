@@ -15,8 +15,78 @@ const roomStore = require('./lib/room-store');
 const PORT = process.env.PORT || 3000;
 const DEFAULT_IP = '192.168.1.151';
 
+const STATS_INTERVAL_MS = parseInt(process.env.STATS_INTERVAL_MS, 10) || 900000; // 15 min
+const STATS_DIR = path.join(__dirname, 'data');
+const STATS_FILE = path.join(STATS_DIR, 'daily-stats.json');
+
 const persistStore = roomStore.loadAll();
 const rooms = {};
+
+// --- Stats ---
+let statsDate = '';
+let statsSamples = new Array(24).fill(0); // 24 hours, max receivers per hour
+
+function ensureStatsDir() {
+  if (!fs.existsSync(STATS_DIR)) fs.mkdirSync(STATS_DIR, { recursive: true });
+}
+
+function loadStats() {
+  try {
+    if (!fs.existsSync(STATS_FILE)) return;
+    const raw = fs.readFileSync(STATS_FILE, 'utf8');
+    const data = JSON.parse(raw);
+    if (data.date && Array.isArray(data.samples) && data.samples.length === 24) {
+      statsDate = data.date;
+      statsSamples = data.samples;
+    }
+  } catch (_) { /* ignore corrupt file */ }
+}
+
+function saveStats() {
+  ensureStatsDir();
+  fs.writeFileSync(STATS_FILE, JSON.stringify({ date: statsDate, samples: statsSamples }));
+}
+
+function localDate(now) {
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function resetStats() {
+  statsDate = localDate(new Date());
+  statsSamples = new Array(24).fill(0);
+  saveStats();
+}
+
+function sampleStats() {
+  const now = new Date();
+  const today = localDate(now);
+  const hour = now.getHours();
+
+  // Cross-day reset
+  if (statsDate !== today) {
+    statsDate = today;
+    statsSamples = new Array(24).fill(0);
+  }
+
+  // Count live receivers across all rooms that have an active sender
+  let totalReceivers = 0;
+  for (const [code, room] of Object.entries(rooms)) {
+    const senderAlive = room.sender && room.sender.readyState === 1;
+    if (!senderAlive) continue;
+    totalReceivers += room.receivers.filter(r => r.readyState === 1).length;
+  }
+
+  // Update hourly max
+  if (totalReceivers > statsSamples[hour]) {
+    statsSamples[hour] = totalReceivers;
+    saveStats();
+  }
+}
+
+loadStats();
 
 // --- HTTP Server ---
 const server = http.createServer((req, res) => {
@@ -57,6 +127,34 @@ const server = http.createServer((req, res) => {
       total: totalSenders + totalReceivers,
       list: roomsList,
     }));
+    return;
+  }
+
+  if (pathname === '/api/stats') {
+    if (!checkAdminApiAccess(req, query.get('token'))) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: '禁止访问' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+    res.end(JSON.stringify({ date: statsDate, samples: statsSamples }));
+    return;
+  }
+
+  if (pathname === '/api/stats/reset') {
+    if (!checkAdminApiAccess(req, query.get('token'))) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: '禁止访问' }));
+      return;
+    }
+    if (req.method === 'POST') {
+      resetStats();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, date: statsDate }));
+    } else {
+      res.writeHead(405, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: '仅支持 POST' }));
+    }
     return;
   }
 
@@ -389,6 +487,10 @@ setInterval(() => {
     }
   }
 }, 60000);
+
+// Stats sampling (every STATS_INTERVAL_MS, default 15 min)
+setInterval(sampleStats, STATS_INTERVAL_MS);
+sampleStats(); // initial sample on startup
 
 wss.on('connection', (ws) => {
   let currentRoom = null;
