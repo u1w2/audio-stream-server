@@ -7,6 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>音频播放</title>
+<script src="/webrtc-low-latency.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -569,6 +570,7 @@ function bindReceiverIceHandlers(pc, useTurn) {
     logToServer('ice=' + ice + ' useTurn=' + useTurn, 'ice');
 
     if (ice === 'connected' || ice === 'completed') {
+      WebRTCLowLatency.applyPlayout(pc);
       if (_networkRecoveryTimer) {
         clearTimeout(_networkRecoveryTimer);
         _networkRecoveryTimer = null;
@@ -1259,8 +1261,8 @@ function handleWebRTCOffer(msg) {
 
     p2pPC.setRemoteDescription(new RTCSessionDescription(msg.sdp)).then(() => {
       flushPendingCandidates();
-      return p2pPC.createAnswer();
-    }).then(answer => p2pPC.setLocalDescription(answer)).then(() => {
+      return WebRTCLowLatency.createAnswer(p2pPC);
+    }).then(() => {
       if (ws.readyState === 1) {
         ws.send(JSON.stringify({
           type: 'webrtc-answer',
@@ -1322,8 +1324,8 @@ function handleWebRTCOffer(msg) {
 
   p2pPC.setRemoteDescription(new RTCSessionDescription(msg.sdp)).then(() => {
     flushPendingCandidates();
-    return p2pPC.createAnswer();
-  }).then(answer => p2pPC.setLocalDescription(answer)).then(() => {
+    return WebRTCLowLatency.createAnswer(p2pPC);
+  }).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({ type: 'webrtc-answer', receiverId: myReceiverId, sdp: p2pPC.localDescription.toJSON() }));
       logToServer('已发送 answer useTURN=' + useTurn, 'webrtc');
@@ -1367,8 +1369,8 @@ function handleTurnProbeOffer(msg) {
       turnProbePC.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
     });
     turnProbePendingCandidates = [];
-    return turnProbePC.createAnswer();
-  }).then(answer => turnProbePC.setLocalDescription(answer)).then(() => {
+    return WebRTCLowLatency.createAnswer(turnProbePC);
+  }).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({
         type: 'webrtc-answer',
@@ -1409,8 +1411,8 @@ function handleProbeOffer(msg) {
       probePC.addIceCandidate(new RTCIceCandidate(c)).catch(() => {});
     });
     probePendingCandidates = [];
-    return probePC.createAnswer();
-  }).then(answer => probePC.setLocalDescription(answer)).then(() => {
+    return WebRTCLowLatency.createAnswer(probePC);
+  }).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({
         type: 'webrtc-answer',
@@ -1425,6 +1427,8 @@ function handleProbeOffer(msg) {
 function startPlayback(isTurn) {
   if (!p2pRemoteStream) return;
   logToServer('startPlayback isTurn=' + !!isTurn + ' ice=' + (p2pPC ? p2pPC.iceConnectionState : 'none'), 'media');
+
+  if (!isTurn && p2pPC) WebRTCLowLatency.applyPlayout(p2pPC);
 
   if (audioCtx && audioCtx.state === 'suspended') {
     audioCtx.resume();

@@ -7,6 +7,7 @@
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
 <title>音频流发送端</title>
+<script src="/webrtc-low-latency.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
@@ -963,7 +964,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.21-sender-ui 已加载', 'version');
+    logToServer('【版本】V6.22-low-latency 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -1313,7 +1314,7 @@ function createTurnProbePC(deviceId) {
 }
 
 function sendTurnOffer(deviceId, pc, flags) {
-  return pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
+  return WebRTCLowLatency.createOffer(pc).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({
         type: 'webrtc-offer',
@@ -1366,7 +1367,7 @@ function startP2P(deviceId) {
   const pc = createPC(deviceId, false, false);
   if (!pc) return;
 
-  pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
+  WebRTCLowLatency.createOffer(pc).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({
         type: 'webrtc-offer',
@@ -1600,8 +1601,7 @@ async function restartIceP2P(deviceId) {
     const fastVerify = !!pc._p2pVerified;
     pc._p2pVerified = false;
     pc._fastVerify = fastVerify;
-    const offer = await pc.createOffer({ iceRestart: true });
-    await pc.setLocalDescription(offer);
+    const offer = await WebRTCLowLatency.createOffer(pc, { iceRestart: true });
     if (ws && ws.readyState === 1) {
       ws.send(JSON.stringify({
         type: 'webrtc-offer',
@@ -2114,7 +2114,7 @@ function tryReconnectP2P(deviceId) {
   }
 
   const probePc = createPC(deviceId, false, true);
-  probePc.createOffer().then(offer => probePc.setLocalDescription(offer)).then(() => {
+  WebRTCLowLatency.createOffer(probePc).then(() => {
     if (ws.readyState === 1) {
       ws.send(JSON.stringify({
         type: 'webrtc-offer',
