@@ -87,6 +87,13 @@
   </div>
 
   <div id="stepCreate">
+    <div style="margin-bottom:16px; text-align:left;">
+      <label style="font-size:12px; color:#888; display:block; margin-bottom:6px;">最大听众数（1–9，默认 5）</label>
+      <input type="number" id="inputMaxConn" min="1" max="9" value="5"
+        style="width:100%; padding:12px 14px; border:2px solid rgba(255,255,255,0.1); border-radius:12px;
+        background:rgba(255,255,255,0.05); color:#e0e0e0; font-size:16px; outline:none;">
+      <p style="font-size:11px; color:#666; margin-top:8px;">本房间最多 9 人同时收听</p>
+    </div>
     <button class="btn btn-primary" id="btnCreate" onclick="createRoom()">创建房间</button>
   </div>
 
@@ -112,12 +119,43 @@
 <script>
 let ws = null;
 let roomCode = null;
+let senderToken = null;
 let audioStream = null;
 let localAudioTrack = null;
 let isStreaming = false;
 let deviceCounter = 0;
 let deviceList = {};
-let selectedBitrate = 750000; // 默认无损
+let selectedBitrate = 750000;
+let _senderReconnectTimer = null;
+let _senderReconnecting = false;
+let _wasStreamingBeforeDisconnect = false;
+
+const SENDER_SESSION_KEY = 'audio-stream-sender';
+
+function saveSenderSession(data) {
+  try {
+    sessionStorage.setItem(SENDER_SESSION_KEY, JSON.stringify(data));
+  } catch (_) {}
+}
+
+function loadSenderSession() {
+  try {
+    return JSON.parse(sessionStorage.getItem(SENDER_SESSION_KEY) || 'null');
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearSenderSession() {
+  try { sessionStorage.removeItem(SENDER_SESSION_KEY); } catch (_) {}
+}
+
+function isP2PConnected(deviceId) {
+  const pc = peerConnections[deviceId];
+  if (!pc || pc._useTURN) return false;
+  const ice = pc.iceConnectionState;
+  return ice === 'connected' || ice === 'completed';
+}
 
 // WebRTC
 let peerConnections = {};
@@ -439,8 +477,31 @@ function enterP2PMode(deviceId, pc) {
 }
 
 // --- WebSocket (signaling only) ---
+function scheduleSenderReconnect() {
+  if (!roomCode || !senderToken || _senderReconnectTimer) return;
+  _senderReconnectTimer = setTimeout(() => {
+    _senderReconnectTimer = null;
+    if (!roomCode || (ws && ws.readyState === WebSocket.OPEN)) return;
+    _senderReconnecting = true;
+    connectWS().then(() => {
+      ws.send(JSON.stringify({ type: 'resume-sender', code: roomCode, senderToken }));
+    }).catch(() => {
+      _senderReconnecting = false;
+      scheduleSenderReconnect();
+    });
+  }, 3000);
+}
+
 function connectWS() {
   return new Promise((resolve, reject) => {
+    const oldWs = ws;
+    if (oldWs) {
+      oldWs.onclose = null;
+      oldWs.onmessage = null;
+      oldWs.onerror = null;
+      try { oldWs.close(); } catch (_) {}
+    }
+
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}`);
 
@@ -452,6 +513,11 @@ function connectWS() {
     ws.onopen = () => { clearTimeout(timeout); resolve(); };
     ws.onerror = (e) => { clearTimeout(timeout); reject(e); };
     ws.onclose = () => {
+      if (roomCode && senderToken && isStreaming) {
+        setStatus('connected', '信令断开，尝试恢复…');
+        scheduleSenderReconnect();
+        return;
+      }
       setStatus('disconnected', '连接断开');
       document.getElementById('btnCreate').disabled = false;
     };
@@ -468,7 +534,14 @@ async function createRoom() {
   document.getElementById('btnCreate').disabled = true;
   setStatus('connected', '正在请求音频权限...');
 
-  const maxConnections = parseInt(document.getElementById('inputMaxConn')?.value) || 5;
+  let maxConnections = parseInt(document.getElementById('inputMaxConn')?.value, 10) || 5;
+  if (maxConnections > 9) {
+    maxConnections = 9;
+    const input = document.getElementById('inputMaxConn');
+    if (input) input.value = '9';
+    alert('本房间最多 9 人同时收听，已自动设为 9');
+  }
+  maxConnections = Math.max(1, Math.min(9, maxConnections));
 
   const audioOk = await requestAudioSource();
   if (!audioOk) {
@@ -481,7 +554,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.14-replace-join 已加载', 'version');
+    logToServer('【版本】V6.15-session-resume 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -515,6 +588,12 @@ function handleSignaling(msg) {
   switch (msg.type) {
     case 'created':
       roomCode = msg.code;
+      senderToken = msg.senderToken || senderToken;
+      saveSenderSession({
+        roomCode,
+        senderToken,
+        wasStreaming: false,
+      });
       document.getElementById('stepCreate').classList.add('hidden');
       document.getElementById('stepStreaming').classList.remove('hidden');
       document.getElementById('tipBox').classList.add('hidden');
@@ -530,10 +609,46 @@ function handleSignaling(msg) {
       }
       break;
 
+    case 'sender-resumed': {
+      _senderReconnecting = false;
+      roomCode = msg.code || roomCode;
+      logToServer('sender-resumed receivers=' + (msg.receivers?.length || 0), 'session');
+      saveSenderSession({
+        roomCode,
+        senderToken,
+        wasStreaming: isStreaming || _wasStreamingBeforeDisconnect,
+      });
+      const list = msg.receivers || [];
+      list.forEach((r) => {
+        const devId = r.receiverId;
+        const nick = r.nickname || devId;
+        registerDevice(devId, list.length, nick);
+        if (localAudioTrack) {
+          const pc = peerConnections[devId];
+          if (isP2PConnected(devId) && pc) {
+            logToServer('resume skip restartP2P (ICE connected) ' + devId, 'session');
+            verifyMainP2PMedia(devId, pc);
+          } else if (!pc && !probeConnections[devId]) {
+            startP2P(devId);
+          } else {
+            restartIceP2P(devId);
+          }
+        }
+      });
+      updateDeviceList();
+      if (list.length > 0) {
+        isStreaming = true;
+        document.getElementById('btnStop').classList.remove('hidden');
+        setStatus('streaming', '正在推流 🎵 (' + list.length + ' 个设备)');
+      }
+      break;
+    }
+
     case 'peer-ready': {
       const devId = msg.receiverId || ('device-' + (deviceCounter + 1));
+      const nick = msg.nickname || devId;
       const serverCount = msg.connections || 1;
-      const reg = registerDevice(devId, serverCount);
+      const reg = registerDevice(devId, serverCount, nick);
       updateDeviceList();
       if (localAudioTrack) {
         const pc = peerConnections[devId];
@@ -542,7 +657,11 @@ function handleSignaling(msg) {
           pc.iceConnectionState === 'disconnected' ||
           pc.iceConnectionState === 'closed'
         );
-        if (reg === 'migrated' || stalePc) {
+        if (msg.resuming && isP2PConnected(devId)) {
+          const pc = peerConnections[devId];
+          logToServer('peer-ready resume ICE ok ' + devId, 'session');
+          if (pc) verifyMainP2PMedia(devId, pc);
+        } else if (reg === 'migrated' || stalePc) {
           logToServer('设备重连/迁移，ICE restart deviceId=' + devId);
           restartIceP2P(devId);
         } else if (!pc && !probeConnections[devId]) {
@@ -551,6 +670,7 @@ function handleSignaling(msg) {
       }
       if (!isStreaming) {
         isStreaming = true;
+        saveSenderSession({ roomCode, senderToken, wasStreaming: true });
         document.getElementById('btnStop').classList.remove('hidden');
       }
       const count = Object.keys(deviceList).length;
@@ -1601,9 +1721,10 @@ function migrateDeviceId(oldId, newId) {
   rekeyDeviceMap(_postAnswerExtendCount, oldId, newId);
 }
 
-function registerDevice(devId, serverCount) {
+function registerDevice(devId, serverCount, nickname) {
   if (deviceList[devId]) {
     deviceList[devId].mode = deviceList[devId].mode || 'connecting';
+    if (nickname) deviceList[devId].nickname = nickname;
     return 'exists';
   }
 
@@ -1635,7 +1756,7 @@ function registerDevice(devId, serverCount) {
   }
 
   deviceCounter++;
-  deviceList[devId] = { num: deviceCounter, mode: 'connecting' };
+  deviceList[devId] = { num: deviceCounter, mode: 'connecting', nickname: nickname || devId };
   return 'new';
 }
 
@@ -1701,8 +1822,10 @@ function updateDeviceList() {
     container.innerHTML = '';
   } else {
     container.innerHTML = entries.map(([id, dev]) => {
+      const label = dev.nickname || ('设备 ' + dev.num);
       return `<div class="device-item">
-        <span class="device-id">设备 ${dev.num}</span>
+        <span class="device-id">${label}</span>
+        <span style="color:#555; font-size:11px; margin-left:8px;">${id}</span>
       </div>`;
     }).join('');
   }
@@ -1715,6 +1838,13 @@ function updateConnCount() {
 }
 
 function stopStreaming() {
+  _wasStreamingBeforeDisconnect = false;
+  if (roomCode && senderToken && ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify({ type: 'close-room', code: roomCode, senderToken }));
+    } catch (_) {}
+  }
+  clearSenderSession();
   Object.keys(_relayRetryTimer).forEach(id => clearP2PRetry(id));
   Object.keys(probeConnections).forEach(id => cleanupProbeConnection(id));
   Object.keys(turnProbeConnections).forEach(id => cleanupTurnProbeConnection(id));
@@ -1725,6 +1855,8 @@ function stopStreaming() {
   deviceList = {};
   deviceCounter = 0;
   isStreaming = false;
+  roomCode = null;
+  senderToken = null;
   updateDeviceList();
   document.getElementById('btnStop').classList.add('hidden');
   setStatus('connected', '已停止推流');
@@ -1738,6 +1870,26 @@ function setStatus(state, text) {
   if (state === 'error') dot.classList.add('error');
   document.getElementById('statusText').textContent = text;
 }
+
+window.addEventListener('DOMContentLoaded', async () => {
+  const sess = loadSenderSession();
+  if (!sess?.roomCode || !sess?.senderToken || !sess?.wasStreaming) return;
+  roomCode = sess.roomCode;
+  senderToken = sess.senderToken;
+  _wasStreamingBeforeDisconnect = true;
+  if (!localAudioTrack || localAudioTrack.readyState !== 'live') {
+    setStatus('connected', '请重新选择音频源以恢复推流');
+    return;
+  }
+  try {
+    document.getElementById('stepCreate')?.classList.add('hidden');
+    document.getElementById('stepStreaming')?.classList.remove('hidden');
+    await connectWS();
+    ws.send(JSON.stringify({ type: 'resume-sender', code: roomCode, senderToken }));
+  } catch (_) {
+    scheduleSenderReconnect();
+  }
+});
 </script>
 </body>
 </html>

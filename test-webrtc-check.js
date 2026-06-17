@@ -1,13 +1,8 @@
 /**
- * 实际的 WebRTC 连接测试
- * 用 Node.js 的 wrtc 包模拟两端建立 WebRTC 连接
- * 但服务器上不一定有 wrtc，先用简单方式验证问题
- * 
- * 主要检查：sender 传递的 SDP 和 ICE 是否完整
+ * WebRTC 与 V6.15 静态检查；可选端到端信令（需 ws 模块与服务在 30001 运行）
  */
-const WebSocket = require('ws');
-
-const SERVER = 'ws://127.0.0.1:30001';
+const fs = require('fs');
+const path = require('path');
 
 // 存储从真实页面抓到的 SDP 和 ICE 来验证格式
 let testResults = [];
@@ -66,8 +61,9 @@ test('ICE 地址格式为 IP:port', () => {
 
 // 3. 验证 server.js 中 webrtc-offer 的处理
 console.log('\n--- 服务端转发逻辑验证 ---');
-const fs = require('fs');
-const serverCode = fs.readFileSync('/home/user/audio-stream/server.js', 'utf8');
+const ROOT = __dirname;
+const serverCode = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
+const roomStoreCode = fs.readFileSync(path.join(ROOT, 'lib', 'room-store.js'), 'utf8');
 
 test('server.js 包含 webrtc-offer 消息处理', () => {
   if (!serverCode.includes("case 'webrtc-offer'")) throw new Error('missing webrtc-offer');
@@ -82,9 +78,30 @@ test('server.js 为 offer 添加 targetReceiverId 路由', () => {
   if (!serverCode.includes('targetReceiverId')) throw new Error('missing targetReceiverId routing');
 });
 
+// 3b. V6.15 会话保活与昵称
+console.log('\n--- V6.15 会话/昵称验证 ---');
+test('server.js 包含 resume-sender', () => {
+  if (!serverCode.includes("case 'resume-sender'")) throw new Error('missing resume-sender');
+});
+test('server.js 包含 close-room', () => {
+  if (!serverCode.includes("case 'close-room'")) throw new Error('missing close-room');
+});
+test('server.js 人数上限钳制为 9', () => {
+  if (!serverCode.includes('Math.min(9')) throw new Error('missing maxConnections clamp 9');
+});
+test('server.js join 校验 nickname', () => {
+  if (!serverCode.includes('invalid_nickname')) throw new Error('missing nickname validation');
+});
+test('server.js 使用 room-store 持久化', () => {
+  if (!serverCode.includes("require('./lib/room-store')")) throw new Error('missing room-store');
+});
+test('room-store.js 导出 validateNickname', () => {
+  if (!roomStoreCode.includes('validateNickname')) throw new Error('missing validateNickname');
+});
+
 // 4. 验证 sender.html 中的 WebRTC 代码
 console.log('\n--- Sender WebRTC 代码验证 ---');
-const senderCode = fs.readFileSync('/home/user/audio-stream/public/sender.html', 'utf8');
+const senderCode = fs.readFileSync(path.join(ROOT, 'public', 'sender.html'), 'utf8');
 
 test('sender.html 包含 RTCPeerConnection 创建', () => {
   if (!senderCode.includes('new RTCPeerConnection')) throw new Error('missing RTCPeerConnection');
@@ -105,10 +122,19 @@ test('sender.html 在 peer-ready 前检查 localAudioTrack', () => {
   const match = senderCode.match(/if\s*\(localAudioTrack\)\s*\{/);
   if (!match) throw new Error('missing localAudioTrack check');
 });
+test('sender.html V6.15 resume-sender 重连', () => {
+  if (!senderCode.includes("type: 'resume-sender'")) throw new Error('missing resume-sender');
+});
+test('sender.html 人数上限 UI inputMaxConn', () => {
+  if (!senderCode.includes('inputMaxConn')) throw new Error('missing inputMaxConn');
+});
+test('sender.html 设备列表展示 nickname', () => {
+  if (!senderCode.includes('dev.nickname')) throw new Error('missing nickname in deviceList');
+});
 
 // 5. 验证 receiver.html 中的 WebRTC 代码
 console.log('\n--- Receiver WebRTC 代码验证 ---');
-const receiverCode = fs.readFileSync('/home/user/audio-stream/public/receiver.html', 'utf8');
+const receiverCode = fs.readFileSync(path.join(ROOT, 'public', 'receiver.html'), 'utf8');
 
 test('receiver.html 包含 webrtc-offer 处理', () => {
   if (!receiverCode.includes("case 'webrtc-offer'")) throw new Error('missing webrtc-offer handler');
@@ -124,6 +150,10 @@ test('receiver.html 包含 ontrack 回调', () => {
 });
 test('receiver.html 包含 createAnswer', () => {
   if (!receiverCode.includes('p2pPC.createAnswer')) throw new Error('missing createAnswer');
+});
+test('receiver.html V6.15 clientId 与昵称 join', () => {
+  if (!receiverCode.includes('getOrCreateClientId')) throw new Error('missing clientId');
+  if (!receiverCode.includes('nicknameInput')) throw new Error('missing nickname UI');
 });
 
 // 6. 验证 ICE candidate 序列化
@@ -148,35 +178,47 @@ test('使用了 STUN 服务器', () => {
   if (!receiverCode.includes('stun:stun.l.google.com')) throw new Error('missing STUN in receiver');
 });
 
-// 8. 端到端消息交换测试
-console.log('\n--- 端到端信令交换测试 ---');
+// 8. 端到端信令（可选，需 npm install && 服务运行）
+console.log('\n--- 端到端信令交换测试（可选）---');
 function runEndToEnd() {
+  let WebSocket;
+  try {
+    WebSocket = require('ws');
+  } catch (_) {
+    console.log('  ⏭ 跳过：未安装 ws 模块');
+    return Promise.resolve();
+  }
+  const SERVER = 'ws://127.0.0.1:30001';
   return new Promise((resolve) => {
     console.log('  启动2个客户端模拟信令交换...');
-    
+
     const sender = new WebSocket(SERVER);
     const receiver = new WebSocket(SERVER);
-    
-    let step = 0;
     const log = [];
-    
+    let lastReceiverId = null;
+
     sender.on('open', () => { log.push('sender:open'); tryNext(); });
     receiver.on('open', () => { log.push('receiver:open'); tryNext(); });
-    
+
     sender.on('message', (data) => {
       const msg = JSON.parse(data.toString());
       log.push(`sender:${msg.type}`);
       if (msg.type === 'created') {
         setTimeout(() => {
-          receiver.send(JSON.stringify({ type: 'join', code: msg.code }));
+          receiver.send(JSON.stringify({
+            type: 'join',
+            code: msg.code,
+            nickname: '427',
+            clientId: 'bc-' + 'a'.repeat(16),
+          }));
           log.push('receiver:join');
         }, 100);
       }
       if (msg.type === 'peer-ready') {
-        // Sender sends WebRTC offer
+        lastReceiverId = msg.receiverId;
         sender.send(JSON.stringify({
           type: 'webrtc-offer',
-          targetReceiverId: 'device-1',
+          targetReceiverId: msg.receiverId,
           sdp: { type: 'offer', sdp: mockOfferSDP.sdp }
         }));
         log.push('sender:offer');
@@ -191,17 +233,15 @@ function runEndToEnd() {
       const msg = JSON.parse(data.toString());
       log.push(`receiver:${msg.type}`);
       if (msg.type === 'webrtc-offer') {
-        // Simulate answer
         receiver.send(JSON.stringify({
           type: 'webrtc-answer',
-          receiverId: 'device-1',
+          receiverId: lastReceiverId || msg.targetReceiverId,
           sdp: { type: 'answer', sdp: mockAnswerSDP.sdp }
         }));
         log.push('receiver:answer');
-        // Also send ICE
         receiver.send(JSON.stringify({
           type: 'webrtc-ice',
-          receiverId: 'device-1',
+          receiverId: lastReceiverId || msg.targetReceiverId,
           candidate: mockCandidate
         }));
         log.push('receiver:ice');
@@ -218,12 +258,11 @@ function runEndToEnd() {
     }
     
     function checkDone() {
-      const expected = ['sender:open', 'receiver:open', 'sender:create', 'sender:created', 
-                        'receiver:join', 'receiver:joined', 'receiver:room-config',
+      const expected = ['sender:open', 'receiver:open', 'sender:create', 'sender:created',
+                        'receiver:join', 'receiver:joined',
                         'sender:peer-ready', 'sender:offer', 'receiver:webrtc-offer',
                         'receiver:answer', 'sender:webrtc-answer', 'sender:got-answer',
                         'receiver:ice', 'sender:webrtc-ice'];
-      
       // Check webrtc-ice from receiver proxied to sender
       if (log.includes('sender:webrtc-ice') && log.includes('sender:got-answer')) {
         console.log('  信令流:');

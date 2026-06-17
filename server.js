@@ -1,6 +1,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const QRCode = require('qrcode');
 const {
@@ -9,15 +10,18 @@ const {
   readLogFileTail,
   checkDebugToken,
 } = require('./lib/debug-log');
+const roomStore = require('./lib/room-store');
 
 const PORT = process.env.PORT || 3000;
 const DEFAULT_IP = '192.168.1.151';
+
+const persistStore = roomStore.loadAll();
+const rooms = {};
 
 // --- HTTP Server ---
 const server = http.createServer((req, res) => {
   let pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
 
-  // API 端点：在线状态
   if (pathname === '/api/status') {
     const roomsList = Object.entries(rooms).map(([code, room]) => {
       const senderAlive = room.sender && room.sender.readyState === 1;
@@ -26,6 +30,7 @@ const server = http.createServer((req, res) => {
         code,
         sender: senderAlive,
         receivers: receiversAlive.length,
+        maxConnections: room.maxConnections,
         createdAt: room._createdAt,
         uptime: room._createdAt ? Math.floor((Date.now() - room._createdAt) / 1000) : 0,
       };
@@ -51,7 +56,6 @@ const server = http.createServer((req, res) => {
 
   const query = new URL(req.url, `http://${req.headers.host}`).searchParams;
 
-  // 调试日志：JSON 查询
   if (pathname === '/api/debug/logs') {
     if (!checkDebugToken(query.get('token'))) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
@@ -78,7 +82,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 调试日志：文本下载（NDJSON，每行一条 JSON）
   if (pathname === '/api/debug/logs/download') {
     if (!checkDebugToken(query.get('token'))) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -125,15 +128,86 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// --- WebSocket Signaling Server (no audio relay) ---
 const wss = new WebSocketServer({ server });
-const rooms = {};
 
 function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
   for (let i = 0; i < 5; i++) code += chars[Math.floor(Math.random() * chars.length)];
   return code;
+}
+
+function codeExists(code) {
+  return !!rooms[code] || !!persistStore.rooms[code];
+}
+
+function getMeta(code) {
+  const room = rooms[code];
+  if (room && room._meta) return room._meta;
+  return persistStore.rooms[code] || null;
+}
+
+function persistRoom(code) {
+  const room = rooms[code];
+  if (!room || !room._meta) return;
+  roomStore.syncRecordFromMemory(room._meta, room);
+  roomStore.upsertRoom(persistStore, room._meta);
+}
+
+function deleteRoom(code) {
+  const room = rooms[code];
+  if (room && room._senderGraceTimer) {
+    clearTimeout(room._senderGraceTimer);
+    room._senderGraceTimer = null;
+  }
+  if (room && room._receiverGraceTimers) {
+    room._receiverGraceTimers.forEach(t => clearTimeout(t));
+    room._receiverGraceTimers.clear();
+  }
+  delete rooms[code];
+  roomStore.removeRoom(persistStore, code);
+}
+
+function createMemoryRoomFromRecord(record) {
+  return {
+    sender: null,
+    receivers: [],
+    maxConnections: record.maxConnections,
+    receiverCount: record.receiverCount || 0,
+    _host: record.host,
+    _createdAt: record.createdAt,
+    _meta: record,
+    _senderGraceTimer: null,
+    _receiverGraceTimers: new Map(),
+  };
+}
+
+function loadPersistedRooms() {
+  roomStore.purgeExpired(persistStore);
+  for (const [code, record] of Object.entries(persistStore.rooms)) {
+    if (!roomStore.isRoomExpired(record)) {
+      rooms[code] = createMemoryRoomFromRecord(record);
+    }
+  }
+  console.log(`[RoomStore] Loaded ${Object.keys(rooms).length} room(s) from JSON`);
+}
+
+function touchRoomActivity(code) {
+  const room = rooms[code];
+  if (!room || !room._meta) return;
+  roomStore.touchRoom(room._meta);
+  persistRoom(code);
+}
+
+function sendPeerReady(room, code, receiverId, nickname) {
+  const count = room.receivers.length;
+  room.sender?.send(JSON.stringify({
+    type: 'peer-ready',
+    connections: count,
+    receiverId,
+    nickname: nickname || receiverId,
+    resuming: true,
+  }));
 }
 
 function evictReceiver(room, roomCode, victimWs, reason) {
@@ -147,9 +221,11 @@ function evictReceiver(room, roomCode, victimWs, reason) {
     victimWs.close(4000, reason || 'replaced');
   } catch (_) {}
   if (room.sender && room.sender.readyState === 1 && oldId) {
+    const slot = room._meta?.receivers?.find(s => s.receiverId === oldId);
     room.sender.send(JSON.stringify({
       type: 'peer-left',
       receiverId: oldId,
+      nickname: slot?.nickname || oldId,
       connections: room.receivers.length,
       reason: 'replaced',
     }));
@@ -166,6 +242,64 @@ function evictOtherReceivers(room, roomCode, keepWs, reason) {
   victims.forEach(v => evictReceiver(room, roomCode, v, reason));
 }
 
+function evictReceiverByClientId(room, roomCode, clientId, keepWs) {
+  room.receivers
+    .filter(r => r !== keepWs && r._clientId === clientId)
+    .forEach(v => evictReceiver(room, roomCode, v, 'clientId_resume'));
+}
+
+function scheduleSenderGrace(code) {
+  const room = rooms[code];
+  if (!room) return;
+  if (room._senderGraceTimer) clearTimeout(room._senderGraceTimer);
+  room._senderGraceTimer = setTimeout(() => {
+    room._senderGraceTimer = null;
+    if (!rooms[code] || rooms[code].sender) return;
+    appendDebugLog('server', 'Sender grace expired, room kept for resume', { room: code, tag: 'session' });
+  }, roomStore.SENDER_GRACE_MS);
+}
+
+function scheduleReceiverGrace(code, receiverId) {
+  const room = rooms[code];
+  if (!room) return;
+  if (!room._receiverGraceTimers) room._receiverGraceTimers = new Map();
+  const existing = room._receiverGraceTimers.get(receiverId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    room._receiverGraceTimers.delete(receiverId);
+    const r = rooms[code];
+    if (!r) return;
+    const stillLive = r.receivers.some(ws => ws._receiverId === receiverId && ws.readyState === 1);
+    if (stillLive) return;
+    if (r.sender && r.sender.readyState === 1) {
+      const slot = r._meta?.receivers?.find(s => s.receiverId === receiverId);
+      r.sender.send(JSON.stringify({
+        type: 'peer-left',
+        receiverId,
+        nickname: slot?.nickname || receiverId,
+        connections: r.receivers.length,
+        reason: 'grace_expired',
+      }));
+    }
+    appendDebugLog('server', 'Receiver grace expired (slot kept)', {
+      room: code,
+      receiverId,
+      tag: 'session',
+    });
+  }, roomStore.RECEIVER_GRACE_MS);
+  room._receiverGraceTimers.set(receiverId, timer);
+}
+
+function clearReceiverGrace(code, receiverId) {
+  const room = rooms[code];
+  if (!room || !room._receiverGraceTimers) return;
+  const t = room._receiverGraceTimers.get(receiverId);
+  if (t) {
+    clearTimeout(t);
+    room._receiverGraceTimers.delete(receiverId);
+  }
+}
+
 async function generateQRDataURL(text) {
   try {
     return await QRCode.toDataURL(text, {
@@ -177,6 +311,80 @@ async function generateQRDataURL(text) {
   }
 }
 
+async function buildJoinedPayload(room, code, receiverId, nickname, joinToken, resumed) {
+  const host = room._host || 'www.u1w2.com';
+  const joinUrl = `https://${host}/receiver?code=${code}&t=${Date.now()}`;
+  let qrDataUrl = null;
+  try { qrDataUrl = await generateQRDataURL(joinUrl); } catch (_) {}
+  return {
+    type: 'joined',
+    code,
+    receiverId,
+    nickname,
+    joinToken,
+    resumed: !!resumed,
+    qrDataUrl,
+    joinUrl,
+  };
+}
+
+function attachReceiverWs(room, code, ws, receiverId, nickname, clientId, joinToken) {
+  room.receivers.push(ws);
+  ws._receiverId = receiverId;
+  ws._nickname = nickname;
+  ws._clientId = clientId;
+  ws._joinToken = joinToken;
+  ws._role = 'receiver';
+  ws._room = code;
+  clearReceiverGrace(code, receiverId);
+  roomStore.upsertSlot(room._meta, {
+    receiverId,
+    joinToken,
+    clientId,
+    nickname,
+  });
+  roomStore.touchSlot(room._meta, receiverId);
+  persistRoom(code);
+}
+
+function countLiveReceivers(room) {
+  return room.receivers.filter(r => r.readyState === 1).length;
+}
+
+function isNicknameUsedInRoom(room, meta, nickname, exceptReceiverId) {
+  if (roomStore.isNicknameTaken(meta, nickname, exceptReceiverId)) return true;
+  const key = roomStore.nicknameKey(nickname);
+  for (const r of room.receivers) {
+    if (!r._nickname || r.readyState !== 1) continue;
+    if (exceptReceiverId && r._receiverId === exceptReceiverId) continue;
+    if (roomStore.nicknameKey(r._nickname) === key) return true;
+  }
+  return false;
+}
+
+loadPersistedRooms();
+
+setInterval(() => {
+  roomStore.purgeExpired(persistStore);
+  const now = Date.now();
+  for (const code of Object.keys(rooms)) {
+    const meta = getMeta(code);
+    if (!meta || roomStore.isRoomExpired(meta, now)) {
+      const room = rooms[code];
+      if (room) {
+        room.receivers.forEach(r => {
+          try { r.send(JSON.stringify({ type: 'error', message: '房间已过期', code: 'room_expired' })); } catch (_) {}
+          try { r.close(4001, 'room_expired'); } catch (_) {}
+        });
+        if (room.sender) {
+          try { room.sender.send(JSON.stringify({ type: 'error', message: '房间已过期', code: 'room_expired' })); } catch (_) {}
+        }
+      }
+      deleteRoom(code);
+    }
+  }
+}, 60000);
+
 wss.on('connection', (ws) => {
   let currentRoom = null;
   let currentRole = null;
@@ -185,105 +393,256 @@ wss.on('connection', (ws) => {
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
+    if (currentRoom && rooms[currentRoom]) {
+      touchRoomActivity(currentRoom);
+      if (currentRole === 'receiver' && ws._receiverId && rooms[currentRoom]._meta) {
+        roomStore.touchSlot(rooms[currentRoom]._meta, ws._receiverId);
+      }
+    }
+
     switch (msg.type) {
       case 'create': {
         let code;
-        do { code = generateCode(); } while (rooms[code]);
-        const maxConnections = Math.max(1, Math.min(20, parseInt(msg.maxConnections) || 5));
-        rooms[code] = { sender: ws, maxConnections, receivers: [], receiverCount: 0, _host: msg.host, _createdAt: Date.now() };
+        do { code = generateCode(); } while (codeExists(code));
+        const maxConnections = Math.max(1, Math.min(9, parseInt(msg.maxConnections, 10) || 5));
+        const senderToken = roomStore.generateToken();
+        const host = msg.host || `${DEFAULT_IP}:${PORT}`;
+        const record = roomStore.createEmptyRecord(code, { senderToken, maxConnections, host });
+        roomStore.upsertRoom(persistStore, record);
+
+        rooms[code] = {
+          sender: ws,
+          maxConnections,
+          receivers: [],
+          receiverCount: record.receiverCount,
+          _host: host,
+          _createdAt: record.createdAt,
+          _meta: record,
+          _senderGraceTimer: null,
+          _receiverGraceTimers: new Map(),
+        };
         currentRoom = code;
         currentRole = 'sender';
 
         const ts = Date.now();
-        const host = msg.host || `${DEFAULT_IP}:${PORT}`;
         const receiverUrl = `https://${host}/receiver?code=${code}&t=${ts}`;
         const qrDataUrl = await generateQRDataURL(receiverUrl);
 
-        ws.send(JSON.stringify({ type: 'created', code, qrDataUrl, receiverUrl }));
+        ws.send(JSON.stringify({
+          type: 'created',
+          code,
+          senderToken,
+          maxConnections,
+          qrDataUrl,
+          receiverUrl,
+        }));
         ws._role = 'sender';
         ws._room = code;
-        appendDebugLog('server', `Room created ${code}`, { room: code, host: msg.host });
-        console.log(`[Room] Created: ${code}`);
+        ws._senderToken = senderToken;
+        appendDebugLog('server', `Room created ${code}`, { room: code, host, maxConnections, tag: 'session' });
+        console.log(`[Room] Created: ${code} (max=${maxConnections})`);
+        break;
+      }
+
+      case 'resume-sender': {
+        const code = msg.code?.toUpperCase();
+        const room = rooms[code];
+        const meta = getMeta(code);
+        if (!room || !meta) {
+          ws.send(JSON.stringify({ type: 'error', message: '房间不存在', code: 'room_not_found' }));
+          return;
+        }
+        if (!roomStore.safeEqual(msg.senderToken || '', meta.senderToken)) {
+          ws.send(JSON.stringify({ type: 'error', message: '发送端凭证无效', code: 'invalid_token' }));
+          return;
+        }
+        if (roomStore.isRoomExpired(meta)) {
+          ws.send(JSON.stringify({ type: 'error', message: '房间已过期', code: 'room_expired' }));
+          deleteRoom(code);
+          return;
+        }
+        if (room._senderGraceTimer) {
+          clearTimeout(room._senderGraceTimer);
+          room._senderGraceTimer = null;
+        }
+        room.sender = ws;
+        ws._role = 'sender';
+        ws._room = code;
+        ws._senderToken = meta.senderToken;
+        currentRoom = code;
+        currentRole = 'sender';
+        touchRoomActivity(code);
+
+        const receiverSummaries = roomStore.listReceiverSummaries(meta);
+        ws.send(JSON.stringify({
+          type: 'sender-resumed',
+          code,
+          receivers: receiverSummaries,
+        }));
+
+        for (const rws of room.receivers) {
+          if (rws.readyState === 1 && rws._receiverId) {
+            sendPeerReady(room, code, rws._receiverId, rws._nickname);
+          }
+        }
+        appendDebugLog('server', 'Sender resumed', { room: code, receivers: receiverSummaries.length, tag: 'session' });
+        break;
+      }
+
+      case 'close-room': {
+        const code = msg.code?.toUpperCase() || ws._room;
+        const room = rooms[code];
+        const meta = getMeta(code);
+        if (!room || !meta) return;
+        if (!roomStore.safeEqual(msg.senderToken || '', meta.senderToken)) {
+          ws.send(JSON.stringify({ type: 'error', message: '发送端凭证无效', code: 'invalid_token' }));
+          return;
+        }
+        room.receivers.forEach(r => {
+          try { r.send(JSON.stringify({ type: 'peer-disconnected' })); } catch (_) {}
+          try { r.close(4001, 'room_closed'); } catch (_) {}
+        });
+        deleteRoom(code);
+        currentRoom = null;
+        currentRole = null;
+        appendDebugLog('server', 'Room closed (explicit)', { room: code, tag: 'session' });
+        console.log(`[Room] Closed: ${code}`);
         break;
       }
 
       case 'join': {
         const code = msg.code?.toUpperCase();
         if (!rooms[code]) {
-          ws.send(JSON.stringify({ type: 'error', message: '房间不存在' }));
+          ws.send(JSON.stringify({ type: 'error', message: '房间不存在', code: 'room_not_found' }));
           return;
         }
         const room = rooms[code];
+        const meta = room._meta;
+        if (!meta || roomStore.isRoomExpired(meta)) {
+          ws.send(JSON.stringify({ type: 'error', message: '房间已过期', code: 'room_expired' }));
+          deleteRoom(code);
+          return;
+        }
 
-        // 清理已断开的 receiver，并通知 sender 移除对应设备
+        let nickname = roomStore.normalizeNickname(msg.nickname || '');
+        if (!roomStore.validateNickname(nickname)) {
+          ws.send(JSON.stringify({ type: 'error', message: '昵称无效（1-16 字，仅中文/字母/数字）', code: 'invalid_nickname' }));
+          return;
+        }
+
+        const clientId = msg.clientId || '';
+        if (clientId && !roomStore.validateClientId(clientId)) {
+          ws.send(JSON.stringify({ type: 'error', message: '客户端 ID 无效', code: 'invalid_client_id' }));
+          return;
+        }
+
         room.receivers.filter(r => r.readyState !== 1).forEach(dead => {
           if (room.sender && room.sender.readyState === 1 && dead._receiverId) {
+            const slot = meta.receivers?.find(s => s.receiverId === dead._receiverId);
             room.sender.send(JSON.stringify({
               type: 'peer-left',
               receiverId: dead._receiverId,
+              nickname: slot?.nickname || dead._receiverId,
               connections: 0,
             }));
           }
         });
         room.receivers = room.receivers.filter(r => r.readyState === 1);
 
-        // 同一 WebSocket 重复 join：仅恢复会话，不重复注册设备
         if (ws._receiverId) {
           const existing = room.receivers.find(r => r === ws);
           if (existing) {
-            const host = room._host || 'www.u1w2.com';
-            const joinUrl = `https://${host}/receiver?code=${code}&t=${Date.now()}`;
-            let qrDataUrl = null;
-            try { qrDataUrl = await generateQRDataURL(joinUrl); } catch (_) {}
-            ws.send(JSON.stringify({
-              type: 'joined',
-              code,
-              receiverId: ws._receiverId,
-              qrDataUrl,
-              joinUrl,
-            }));
+            const payload = await buildJoinedPayload(
+              room, code, ws._receiverId, ws._nickname || nickname, ws._joinToken, true
+            );
+            ws.send(JSON.stringify(payload));
             ws._role = 'receiver';
             ws._room = code;
-            const rejoinCount = room.receivers.length;
-            room.sender?.send(JSON.stringify({
-              type: 'peer-ready',
-              connections: rejoinCount,
-              receiverId: ws._receiverId,
-            }));
-            appendDebugLog('server', 'Receiver re-joined (same ws)', { room: code, receiverId: ws._receiverId });
+            currentRoom = code;
+            currentRole = 'receiver';
+            sendPeerReady(room, code, ws._receiverId, ws._nickname || nickname);
+            appendDebugLog('server', 'Receiver re-joined (same ws)', { room: code, receiverId: ws._receiverId, tag: 'session' });
             break;
           }
         }
 
+        const { slot: resumeSlot, reason: resumeReason } = roomStore.findSlot(meta, {
+          resumeReceiverId: msg.resumeReceiverId,
+          joinToken: msg.joinToken,
+          clientId,
+        });
+
+        let resumed = false;
+        let receiverId;
+        let joinToken;
+
+        if (resumeSlot) {
+          if (resumeReason === 'token' && !roomStore.safeEqual(msg.joinToken || '', resumeSlot.joinToken)) {
+            ws.send(JSON.stringify({ type: 'error', message: '会话已过期，请重新加入', code: 'session_expired' }));
+            return;
+          }
+          if (isNicknameUsedInRoom(room, meta, nickname, resumeSlot.receiverId)) {
+            ws.send(JSON.stringify({ type: 'error', message: '昵称已被占用，请换一个', code: 'nickname_taken' }));
+            return;
+          }
+          receiverId = resumeSlot.receiverId;
+          joinToken = resumeSlot.joinToken;
+          resumed = true;
+          if (clientId) evictReceiverByClientId(room, code, clientId, ws);
+        } else {
+          if (msg.resumeReceiverId && msg.joinToken) {
+            ws.send(JSON.stringify({ type: 'error', message: '会话已过期，请重新加入', code: 'session_expired' }));
+            return;
+          }
+          if (isNicknameUsedInRoom(room, meta, nickname)) {
+            ws.send(JSON.stringify({ type: 'error', message: '昵称已被占用，请换一个', code: 'nickname_taken' }));
+            return;
+          }
+        }
+
         const replaceSession = msg.replaceSession !== false;
-        if (replaceSession && room.receivers.length > 0) {
+        if (!resumed && replaceSession && room.receivers.length > 0) {
           evictOtherReceivers(room, code, ws, 'replace_session');
+        } else if (resumed && clientId) {
+          evictReceiverByClientId(room, code, clientId, ws);
         }
 
-        if (room.receivers.length >= room.maxConnections) {
-          ws.send(JSON.stringify({ type: 'error', message: `房间已满（上限 ${room.maxConnections} 个设备）` }));
-          return;
+        if (!resumed) {
+          if (countLiveReceivers(room) >= room.maxConnections) {
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: `房间已满（上限 ${room.maxConnections} 人，当前已满）`,
+              code: 'room_full',
+            }));
+            return;
+          }
+          room.receiverCount++;
+          receiverId = 'dev-' + room.receiverCount + '-' + Date.now().toString(36);
+          joinToken = roomStore.generateToken();
         }
 
-        room.receiverCount++;
-        const receiverId = 'dev-' + room.receiverCount + '-' + Date.now().toString(36);
-        room.receivers.push(ws);
-        ws._receiverId = receiverId;
-        ws._role = 'receiver';
-        ws._room = code;
+        attachReceiverWs(room, code, ws, receiverId, nickname, clientId, joinToken);
         currentRoom = code;
         currentRole = 'receiver';
-        const count = room.receivers.length;
 
-        const host = room._host || 'www.u1w2.com';
-        const joinUrl = `https://${host}/receiver?code=${code}&t=${Date.now()}`;
-        let qrDataUrl = null;
-        try { qrDataUrl = await generateQRDataURL(joinUrl); } catch (_) {}
-
-        ws.send(JSON.stringify({ type: 'joined', code, receiverId, qrDataUrl, joinUrl }));
-        room.sender?.send(JSON.stringify({ type: 'peer-ready', connections: count, receiverId }));
-        appendDebugLog('server', `Receiver joined ${code}`, { room: code, receiverId, count });
-        console.log(`[Room] Joined: ${code} (receiverId: ${receiverId}, total: ${count})`);
+        const payload = await buildJoinedPayload(room, code, receiverId, nickname, joinToken, resumed);
+        ws.send(JSON.stringify(payload));
+        room.sender?.send(JSON.stringify({
+          type: 'peer-ready',
+          connections: room.receivers.length,
+          receiverId,
+          nickname,
+          resuming: resumed,
+        }));
+        appendDebugLog('server', `Receiver joined ${code}`, {
+          room: code,
+          receiverId,
+          nickname,
+          resumed,
+          count: room.receivers.length,
+          tag: 'session',
+        });
+        console.log(`[Room] Joined: ${code} (${receiverId} "${nickname}", resumed=${resumed})`);
         break;
       }
 
@@ -312,8 +671,18 @@ wss.on('connection', (ws) => {
         if (idx !== -1) room.receivers.splice(idx, 1);
         const count = room.receivers.length;
         const receiverId = ws._receiverId;
+        const slot = room._meta?.receivers?.find(s => s.receiverId === receiverId);
+        if (receiverId && room._meta) {
+          roomStore.removeSlot(room._meta, receiverId);
+          persistRoom(currentRoom);
+        }
         if (room.sender && room.sender.readyState === 1) {
-          room.sender.send(JSON.stringify({ type: 'peer-left', connections: count, receiverId }));
+          room.sender.send(JSON.stringify({
+            type: 'peer-left',
+            connections: count,
+            receiverId,
+            nickname: slot?.nickname || receiverId,
+          }));
         }
         appendDebugLog('server', 'Receiver leave (explicit)', {
           room: currentRoom,
@@ -326,7 +695,6 @@ wss.on('connection', (ws) => {
       }
 
       case 'bitrate-change': {
-        // receiver → sender: 请求改变编码码率
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
         if (room.sender && room.sender.readyState === 1) {
@@ -366,6 +734,10 @@ wss.on('connection', (ws) => {
       case 'connection-lost': {
         if (!currentRoom || !rooms[currentRoom]) return;
         const room = rooms[currentRoom];
+        if (ws._receiverId && room._meta) {
+          roomStore.touchSlot(room._meta, ws._receiverId);
+          persistRoom(currentRoom);
+        }
         appendDebugLog('signal', msg.type, {
           room: currentRoom,
           from: currentRole,
@@ -374,7 +746,6 @@ wss.on('connection', (ws) => {
           useTURN: !!msg.useTURN,
           iceRestart: !!msg.iceRestart,
         });
-        console.log(`[Signal] ${msg.type} from ${currentRole} room=${currentRoom} targetId=${msg.targetReceiverId||''} recvId=${msg.receiverId||''}`);
 
         if (msg.targetReceiverId && room.receivers) {
           const target = room.receivers.find(r => r._receiverId === msg.targetReceiverId);
@@ -400,29 +771,36 @@ wss.on('connection', (ws) => {
     if (currentRoom && rooms[currentRoom]) {
       const room = rooms[currentRoom];
       if (currentRole === 'sender') {
+        room.sender = null;
+        scheduleSenderGrace(currentRoom);
         room.receivers.forEach(r => {
-          try { r.send(JSON.stringify({ type: 'peer-disconnected' })); } catch(_) {}
+          try { r.send(JSON.stringify({ type: 'sender-disconnected' })); } catch (_) {}
         });
-        delete rooms[currentRoom];
-        appendDebugLog('server', 'Room deleted (sender left)', { room: currentRoom });
-        console.log(`[Room] Deleted (sender left): ${currentRoom}`);
+        appendDebugLog('server', 'Sender disconnected (grace)', { room: currentRoom, tag: 'session' });
+        console.log(`[Room] Sender grace: ${currentRoom}`);
       } else if (currentRole === 'receiver') {
         const idx = room.receivers.indexOf(ws);
         if (idx !== -1) room.receivers.splice(idx, 1);
-        const count = room.receivers.length;
-        const realReceiverId = ws._receiverId || 'device-' + (idx + 1);
-        if (room.sender && room.sender.readyState === 1) {
-          room.sender.send(JSON.stringify({ type: 'peer-left', connections: count, receiverId: realReceiverId }));
+        const realReceiverId = ws._receiverId;
+        if (realReceiverId) {
+          scheduleReceiverGrace(currentRoom, realReceiverId);
+          if (room._meta) roomStore.touchSlot(room._meta, realReceiverId);
+          persistRoom(currentRoom);
         }
-        appendDebugLog('server', 'Receiver left', { room: currentRoom, receiverId: realReceiverId, remaining: count });
-        console.log(`[Room] Receiver left: ${currentRoom} (${realReceiverId}, remaining: ${count})`);
+        appendDebugLog('server', 'Receiver disconnected (grace)', {
+          room: currentRoom,
+          receiverId: realReceiverId,
+          remaining: room.receivers.length,
+          tag: 'session',
+        });
+        console.log(`[Room] Receiver grace: ${currentRoom} (${realReceiverId})`);
       }
     }
   });
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🎵 Audio Stream (P2P + TURN)`);
+  console.log(`\n🎵 Audio Stream (P2P + TURN) V6.15-session-resume`);
   console.log(`   电脑端: http://localhost:${PORT}`);
   console.log(`   手机端: http://${DEFAULT_IP}:${PORT}/receiver\n`);
 });

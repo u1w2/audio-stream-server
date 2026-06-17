@@ -110,7 +110,92 @@ let ws = null;
 let roomCode = null;
 let isPlaying = false;
 let myReceiverId = null;
-let audioCtx = null; // 用户手势激活的 AudioContext
+let myNickname = null;
+let myJoinToken = null;
+let audioCtx = null;
+let _wsReconnecting = false;
+
+const SESSION_CLIENT_KEY = 'audio-stream-client-id';
+const SESSION_RECEIVER_KEY = 'audio-stream-receiver-sessions';
+const SESSION_TAB_KEY = 'audio-stream-receiver-tab';
+const NICKNAME_RE = /^[\u4e00-\u9fa5a-zA-Z0-9]{1,16}$/;
+/** 与服务端 RECEIVER_SLOT_TTL_MS 默认一致（24h） */
+const RECEIVER_SLOT_TTL_MS = 24 * 60 * 60 * 1000;
+
+function getOrCreateClientId() {
+  let id = localStorage.getItem(SESSION_CLIENT_KEY);
+  if (!id) {
+    id = 'bc-' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    localStorage.setItem(SESSION_CLIENT_KEY, id);
+  }
+  return id;
+}
+
+function loadReceiverSessions() {
+  try {
+    return JSON.parse(localStorage.getItem(SESSION_RECEIVER_KEY) || '{}');
+  } catch (_) {
+    return {};
+  }
+}
+
+function saveReceiverSession(code, data) {
+  const all = loadReceiverSessions();
+  all[code] = { ...data, updatedAt: Date.now() };
+  localStorage.setItem(SESSION_RECEIVER_KEY, JSON.stringify(all));
+}
+
+function getReceiverSession(code) {
+  const entry = loadReceiverSessions()[code];
+  if (!entry) return null;
+  if (entry.updatedAt && Date.now() - entry.updatedAt > RECEIVER_SLOT_TTL_MS) {
+    clearReceiverSession(code);
+    return null;
+  }
+  return entry;
+}
+
+function clearReceiverSession(code) {
+  const all = loadReceiverSessions();
+  delete all[code];
+  localStorage.setItem(SESSION_RECEIVER_KEY, JSON.stringify(all));
+}
+
+function saveTabSession(data) {
+  try {
+    sessionStorage.setItem(SESSION_TAB_KEY, JSON.stringify(data));
+  } catch (_) {}
+}
+
+function getTabSession() {
+  try {
+    return JSON.parse(sessionStorage.getItem(SESSION_TAB_KEY) || 'null');
+  } catch (_) {
+    return null;
+  }
+}
+
+function defaultNickname() {
+  return String(Math.floor(100 + Math.random() * 900));
+}
+
+function validateNicknameInput(name) {
+  const trimmed = (name || '').trim();
+  return trimmed.length >= 1 && NICKNAME_RE.test(trimmed);
+}
+
+function getNicknameFromUI() {
+  const el = document.getElementById('nicknameInput');
+  return el ? el.value.trim() : defaultNickname();
+}
+
+function suggestedNicknameForRoom(code) {
+  const stored = code ? getReceiverSession(code) : null;
+  if (stored && stored.nickname && validateNicknameInput(stored.nickname)) {
+    return stored.nickname;
+  }
+  return defaultNickname();
+}
 
 // WebRTC
 let p2pPC = null;
@@ -150,6 +235,7 @@ function logToServer(text, tag) {
 }
 
 function sendLeave() {
+  if (_wsReconnecting) return;
   if (ws && ws.readyState === WebSocket.OPEN && roomCode) {
     try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
   }
@@ -510,13 +596,49 @@ const preCode = urlParams.get('code');
 const allowMultiJoin = urlParams.get('multi') === '1';
 
 function buildJoinMessage(code, opts) {
-  const msg = { type: 'join', code };
+  const msg = {
+    type: 'join',
+    code,
+    clientId: getOrCreateClientId(),
+    nickname: (opts && opts.nickname) ? opts.nickname.trim() : getNicknameFromUI(),
+  };
+  const stored = getReceiverSession(code);
+  const tab = getTabSession();
+  if (stored && stored.receiverId && stored.joinToken) {
+    msg.resumeReceiverId = stored.receiverId;
+    msg.joinToken = stored.joinToken;
+  } else if (tab && tab.roomCode === code && tab.receiverId && tab.joinToken) {
+    msg.resumeReceiverId = tab.receiverId;
+    msg.joinToken = tab.joinToken;
+  }
   if (opts && opts.replaceSession === false) {
     msg.replaceSession = false;
   } else if (!allowMultiJoin) {
     msg.replaceSession = true;
   }
   return msg;
+}
+
+function nicknameInputHtml(code) {
+  const nick = suggestedNicknameForRoom(code);
+  return `
+    <div style="margin-bottom:16px; text-align:left;">
+      <label style="font-size:12px; color:#888; display:block; margin-bottom:6px;">昵称（房间内唯一）</label>
+      <input type="text" id="nicknameInput" maxlength="16" autocomplete="off" value="${nick}"
+        style="width:100%; padding:12px 14px; border:2px solid rgba(255,255,255,0.1); border-radius:12px;
+        background:rgba(255,255,255,0.05); color:#e0e0e0; font-size:16px; outline:none;">
+    </div>`;
+}
+
+function showJoinError(message, code) {
+  if (code === 'session_expired' || code === 'room_expired' || code === 'room_not_found') {
+    if (roomCode) clearReceiverSession(roomCode);
+  }
+  const actionArea = document.getElementById('actionArea');
+  actionArea.classList.remove('hidden');
+  document.getElementById('playArea')?.classList.add('hidden');
+  const errEl = document.getElementById('joinError');
+  if (errEl) errEl.textContent = message;
 }
 
 window.addEventListener('DOMContentLoaded', () => {
@@ -530,12 +652,19 @@ window.addEventListener('DOMContentLoaded', () => {
   if (preCode) {
     pendingCode = preCode.toUpperCase();
     actionArea.innerHTML = `
+      ${nicknameInputHtml(pendingCode)}
       <button class="btn btn-connect" id="btnActivate" style="font-size:18px; padding:20px;">
         ▶ 点击开始收听
       </button>
       <p style="color:#666; font-size:12px; margin-top:12px;">房间: ${pendingCode}</p>
+      <p id="joinError" style="color:#fca5a5; font-size:12px; margin-top:8px;"></p>
     `;
     document.getElementById('btnActivate').addEventListener('click', () => {
+      const nick = getNicknameFromUI();
+      if (!validateNicknameInput(nick)) {
+        document.getElementById('joinError').textContent = '昵称无效（1-16 字，仅中文/字母/数字）';
+        return;
+      }
       const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
       if (tempCtx.state === 'suspended') tempCtx.resume();
       const audioEl = document.getElementById('p2pAudio');
@@ -550,7 +679,14 @@ window.addEventListener('DOMContentLoaded', () => {
           background:rgba(255,255,255,0.05); color:#e0e0e0; font-size:20px; font-weight:700;
           letter-spacing:6px; text-align:center; text-transform:uppercase; outline:none;">
       </div>
+      <div id="manualNicknameWrap" class="hidden" style="margin-bottom:16px; text-align:left;">
+        <label style="font-size:12px; color:#888; display:block; margin-bottom:6px;">昵称（房间内唯一）</label>
+        <input type="text" id="nicknameInput" maxlength="16" autocomplete="off"
+          style="width:100%; padding:12px 14px; border:2px solid rgba(255,255,255,0.1); border-radius:12px;
+          background:rgba(255,255,255,0.05); color:#e0e0e0; font-size:16px; outline:none;">
+      </div>
       <button class="btn btn-connect" id="btnJoin" onclick="manualJoin()">连接</button>
+      <p id="joinError" style="color:#fca5a5; font-size:12px; margin-top:8px;"></p>
     `;
   }
 });
@@ -590,6 +726,8 @@ async function activatePlayback(ctx) {
     document.getElementById('playHint').textContent = '等待音频...';
     ws.send(JSON.stringify(buildJoinMessage(pendingCode)));
   } catch (err) {
+    document.getElementById('actionArea').classList.remove('hidden');
+    document.getElementById('playArea').classList.add('hidden');
     document.getElementById('playHint').textContent = '连接失败，请重试';
     document.getElementById('playHint').style.color = '#fca5a5';
     btn.disabled = false;
@@ -604,6 +742,22 @@ async function manualJoin() {
   const code = codeEl.value.trim().toUpperCase();
   if (code.length < 4) { alert('请输入有效的房间码'); return; }
 
+  const nickWrap = document.getElementById('manualNicknameWrap');
+  if (nickWrap && nickWrap.classList.contains('hidden')) {
+    nickWrap.classList.remove('hidden');
+    const nickInput = document.getElementById('nicknameInput');
+    if (nickInput && !nickInput.value) nickInput.value = suggestedNicknameForRoom(code);
+    btn.textContent = '确认加入';
+    return;
+  }
+
+  const nick = getNicknameFromUI();
+  if (!validateNicknameInput(nick)) {
+    const errEl = document.getElementById('joinError');
+    if (errEl) errEl.textContent = '昵称无效（1-16 字，仅中文/字母/数字）';
+    return;
+  }
+
   btn.disabled = true;
   btn.textContent = '连接中...';
 
@@ -612,14 +766,21 @@ async function manualJoin() {
   audioEl.pause();
 
   try {
+    document.getElementById('actionArea').classList.add('hidden');
+    document.getElementById('playArea').classList.remove('hidden');
+    document.getElementById('playHint').textContent = '连接中...';
+    setStatus('buffering', '连接中...');
+
     await connectWS();
     roomCode = code;
     setupRoomBroadcast(code);
     ws.send(JSON.stringify(buildJoinMessage(code)));
   } catch (err) {
-    alert('连接服务器失败');
+    document.getElementById('actionArea').classList.remove('hidden');
+    document.getElementById('playArea').classList.add('hidden');
+    showJoinError('连接服务器失败', '');
     btn.disabled = false;
-    btn.textContent = '连接';
+    btn.textContent = '确认加入';
   }
 }
 
@@ -697,9 +858,17 @@ function scheduleWsReconnect() {
   _wsReconnectTimer = setTimeout(() => {
     _wsReconnectTimer = null;
     if (!roomCode || (ws && ws.readyState === WebSocket.OPEN)) return;
+    _wsReconnecting = true;
+    const storedNick = myNickname || getReceiverSession(roomCode)?.nickname;
     connectWS().then(() => {
-      ws.send(JSON.stringify(buildJoinMessage(roomCode, { replaceSession: false })));
-    }).catch(() => scheduleWsReconnect());
+      ws.send(JSON.stringify(buildJoinMessage(roomCode, {
+        replaceSession: false,
+        nickname: storedNick,
+      })));
+    }).catch(() => {
+      _wsReconnecting = false;
+      scheduleWsReconnect();
+    });
   }, 3000);
 }
 
@@ -745,13 +914,55 @@ function connectWS() {
 // --- Signaling ---
 function handleSignaling(msg) {
   switch (msg.type) {
+    case 'error': {
+      _wsReconnecting = false;
+      const errText = msg.message || '连接失败';
+      logToServer('join error: ' + errText + ' code=' + (msg.code || ''), 'session');
+      if (msg.code === 'nickname_taken' || msg.code === 'invalid_nickname' || msg.code === 'room_full') {
+        showJoinError(errText, msg.code);
+        const btn = document.getElementById('btnActivate') || document.getElementById('btnJoin');
+        if (btn) { btn.disabled = false; btn.textContent = btn.id === 'btnActivate' ? '▶ 重试' : '确认加入'; }
+        return;
+      }
+      if (msg.code === 'session_expired' || msg.code === 'room_expired' || msg.code === 'room_not_found') {
+        showJoinError(errText, msg.code);
+        return;
+      }
+      document.getElementById('playHint').textContent = errText;
+      document.getElementById('playHint').style.color = '#fca5a5';
+      break;
+    }
+
     case 'joined': {
+      _wsReconnecting = false;
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
-      logToServer('【版本】V6.14-replace-join joined id=' + myReceiverId, 'version');
-      document.getElementById('playHint').textContent = '等待音频...';
+      myNickname = msg.nickname || myNickname || myReceiverId;
+      myJoinToken = msg.joinToken || myJoinToken;
+      logToServer('【版本】V6.15-session-resume joined id=' + myReceiverId + ' nick=' + myNickname + ' resumed=' + !!msg.resumed, 'version');
+      if (roomCode) {
+        saveReceiverSession(roomCode, {
+          receiverId: myReceiverId,
+          joinToken: myJoinToken,
+          nickname: myNickname,
+        });
+        saveTabSession({
+          roomCode,
+          receiverId: myReceiverId,
+          joinToken: myJoinToken,
+          nickname: myNickname,
+        });
+      }
+      const iceOk = p2pPC && (p2pPC.iceConnectionState === 'connected' || p2pPC.iceConnectionState === 'completed');
+      if (msg.resumed && iceOk) {
+        logToServer('resume: P2P still connected, skip PC rebuild', 'session');
+        resumePlaybackAfterReconnect();
+        setStatus('playing', '已连接 · ' + myNickname);
+      } else {
+        document.getElementById('playHint').textContent = '等待音频...';
+        setStatus('connected', '已连接 · ' + myNickname);
+      }
       document.getElementById('bitrateControl').classList.remove('hidden');
       buildBrToggle();
-      setStatus('connected', '已连接，等待音频...');
       if (msg.qrDataUrl) {
         document.getElementById('qrImage').src = msg.qrDataUrl;
       }
@@ -763,6 +974,11 @@ function handleSignaling(msg) {
       }
       break;
     }
+
+    case 'sender-disconnected':
+      setStatus('connected', '发送端断开，等待恢复…');
+      logToServer('sender-disconnected (grace)', 'session');
+      break;
 
     case 'bitrate-change':
       if (msg.bitrate) {
@@ -827,7 +1043,10 @@ function handleSignaling(msg) {
       document.getElementById('playHint').textContent = '重新连接...';
       setStatus('buffering', '重连中...');
       if (ws && ws.readyState === WebSocket.OPEN && roomCode) {
-        ws.send(JSON.stringify(buildJoinMessage(roomCode, { replaceSession: false })));
+        ws.send(JSON.stringify(buildJoinMessage(roomCode, {
+          replaceSession: false,
+          nickname: myNickname || getReceiverSession(roomCode)?.nickname,
+        })));
       }
       break;
 

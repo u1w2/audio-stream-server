@@ -4,7 +4,9 @@
   "description": "Low-latency audio streaming from PC to phone via WebRTC",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:room-store": "node test-room-store.js",
+    "test:webrtc-check": "node test-webrtc-check.js"
   },
   "dependencies": {
     "ws": "^8.16.0",
