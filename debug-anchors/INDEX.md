@@ -13,9 +13,9 @@
 - `watch` — 保留观察，问题未完全关闭
 - `removed` — 已删代码，仅留档
 
-## 查询日志示例
+## 查询日志示例（服务器本机）
 
 ```
-https://www.u1w2.com/api/debug/logs?limit=200&tag=anchor
-https://www.u1w2.com/api/debug/logs?limit=200&anchor=ICE-003&room=ABCDE
+curl -s "http://127.0.0.1:30001/api/debug/logs?limit=200&tag=anchor"
+curl -s "http://127.0.0.1:30001/api/debug/logs?limit=200&anchor=ICE-003&room=ABCDE"
 ```

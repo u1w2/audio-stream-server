@@ -918,6 +918,25 @@ function detectRelayMode() {
 
 // --- WebSocket (signaling only) ---
 let _wsReconnectTimer = null;
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+let _heartbeatTimer = null;
+
+function startRoomHeartbeat() {
+  stopRoomHeartbeat();
+  if (!roomCode) return;
+  _heartbeatTimer = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'ping' })); } catch (_) {}
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
+function stopRoomHeartbeat() {
+  if (_heartbeatTimer) {
+    clearInterval(_heartbeatTimer);
+    _heartbeatTimer = null;
+  }
+}
 
 function scheduleWsReconnect() {
   if (!roomCode || _wsReconnectTimer) return;
@@ -963,9 +982,14 @@ function connectWS() {
       reject(new Error('连接超时'));
     }, 8000);
 
-    ws.onopen = () => { clearTimeout(timeout); resolve(); };
+    ws.onopen = () => {
+      clearTimeout(timeout);
+      if (roomCode) startRoomHeartbeat();
+      resolve();
+    };
     ws.onerror = (e) => { clearTimeout(timeout); reject(new Error('WebSocket 连接失败')); };
     ws.onclose = () => {
+      stopRoomHeartbeat();
       setStatus('connected', '信令断开，音频继续');
       scheduleWsReconnect();
     };
@@ -1014,7 +1038,7 @@ function handleSignaling(msg) {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
       myNickname = msg.nickname || myNickname || myReceiverId;
       myJoinToken = msg.joinToken || myJoinToken;
-      logToServer('【版本】V6.19-room-reuse joined id=' + myReceiverId + ' nick=' + myNickname + ' resumed=' + !!msg.resumed, 'version');
+      logToServer('【版本】V6.20-room-heartbeat joined id=' + myReceiverId + ' nick=' + myNickname + ' resumed=' + !!msg.resumed, 'version');
       if (roomCode) {
         saveReceiverSession(roomCode, {
           receiverId: myReceiverId,
@@ -1048,6 +1072,7 @@ function handleSignaling(msg) {
           if (roomCode && myReceiverId) notifyNetworkChanged();
         });
       }
+      startRoomHeartbeat();
       break;
     }
 

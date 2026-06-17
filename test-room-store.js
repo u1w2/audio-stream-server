@@ -88,6 +88,13 @@ test('findSlot 按 clientId resume', () => {
   if (!found.slot || found.reason !== 'clientId') throw new Error('clientId resume failed');
 });
 
+test('isRoomExpired 有人在线不过期', () => {
+  const old = rs.createEmptyRecord('LIVE', { senderToken: 'x', maxConnections: 3, host: 'h' });
+  old.lastActivityAt = Date.now() - rs.ROOM_TTL_MS - 1000;
+  const memory = { sender: { readyState: 1 }, receivers: [] };
+  if (rs.isRoomExpired(old, Date.now(), memory)) throw new Error('online room should not expire');
+});
+
 test('purgeExpired 删除过期 room', () => {
   const s = { rooms: {}, version: 1 };
   const old = rs.createEmptyRecord('OLD', { senderToken: 'x', maxConnections: 3, host: 'h' });

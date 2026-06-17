@@ -8,7 +8,7 @@ const {
   appendDebugLog,
   queryLogs,
   readLogFileTail,
-  checkDebugToken,
+  checkAdminApiAccess,
 } = require('./lib/debug-log');
 const roomStore = require('./lib/room-store');
 
@@ -22,7 +22,14 @@ const rooms = {};
 const server = http.createServer((req, res) => {
   let pathname = new URL(req.url, `http://${req.headers.host}`).pathname;
 
+  const query = new URL(req.url, `http://${req.headers.host}`).searchParams;
+
   if (pathname === '/api/status') {
+    if (!checkAdminApiAccess(req, query.get('token'))) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: '禁止访问' }));
+      return;
+    }
     const roomsList = Object.entries(rooms).map(([code, room]) => {
       const senderAlive = room.sender && room.sender.readyState === 1;
       const receiversAlive = room.receivers.filter(r => r.readyState === 1);
@@ -41,7 +48,6 @@ const server = http.createServer((req, res) => {
 
     res.writeHead(200, {
       'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
       'Cache-Control': 'no-cache',
     });
     res.end(JSON.stringify({
@@ -54,12 +60,10 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const query = new URL(req.url, `http://${req.headers.host}`).searchParams;
-
   if (pathname === '/api/debug/logs') {
-    if (!checkDebugToken(query.get('token'))) {
+    if (!checkAdminApiAccess(req, query.get('token'))) {
       res.writeHead(403, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: '需要有效 token（环境变量 DEBUG_LOG_TOKEN）' }));
+      res.end(JSON.stringify({ error: '禁止访问' }));
       return;
     }
     const logs = queryLogs({
@@ -72,7 +76,6 @@ const server = http.createServer((req, res) => {
     });
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
-      'Access-Control-Allow-Origin': '*',
       'Cache-Control': 'no-cache',
     });
     res.end(JSON.stringify({
@@ -84,9 +87,9 @@ const server = http.createServer((req, res) => {
   }
 
   if (pathname === '/api/debug/logs/download') {
-    if (!checkDebugToken(query.get('token'))) {
+    if (!checkAdminApiAccess(req, query.get('token'))) {
       res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-      res.end('403 Forbidden: invalid or missing token');
+      res.end('403 Forbidden');
       return;
     }
     const body = readLogFileTail();
@@ -371,8 +374,8 @@ setInterval(() => {
   const now = Date.now();
   for (const code of Object.keys(rooms)) {
     const meta = getMeta(code);
-    if (!meta || roomStore.isRoomExpired(meta, now)) {
-      const room = rooms[code];
+    const room = rooms[code];
+    if (!meta || roomStore.isRoomExpired(meta, now, room)) {
       if (room) {
         room.receivers.forEach(r => {
           try { r.send(JSON.stringify({ type: 'error', message: '房间已过期', code: 'room_expired' })); } catch (_) {}
@@ -403,6 +406,14 @@ wss.on('connection', (ws) => {
     }
 
     switch (msg.type) {
+      case 'ping':
+      case 'heartbeat': {
+        try {
+          ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+        } catch (_) {}
+        break;
+      }
+
       case 'create': {
         let code;
         do { code = generateCode(); } while (codeExists(code));
@@ -462,7 +473,7 @@ wss.on('connection', (ws) => {
           ws.send(JSON.stringify({ type: 'error', message: '发送端凭证无效', code: 'invalid_token' }));
           return;
         }
-        if (roomStore.isRoomExpired(meta)) {
+        if (roomStore.isRoomExpired(meta, Date.now(), room)) {
           ws.send(JSON.stringify({ type: 'error', message: '房间已过期', code: 'room_expired' }));
           deleteRoom(code);
           return;
@@ -530,7 +541,8 @@ wss.on('connection', (ws) => {
         }
         const room = rooms[code];
         const meta = room._meta;
-        if (!meta || roomStore.isRoomExpired(meta)) {
+        const memRoom = rooms[code];
+        if (!meta || roomStore.isRoomExpired(meta, Date.now(), memRoom)) {
           ws.send(JSON.stringify({ type: 'error', message: '房间已过期', code: 'room_expired' }));
           deleteRoom(code);
           return;
@@ -786,6 +798,7 @@ wss.on('connection', (ws) => {
       const room = rooms[currentRoom];
       if (currentRole === 'sender') {
         room.sender = null;
+        touchRoomActivity(currentRoom);
         scheduleSenderGrace(currentRoom);
         room.receivers.forEach(r => {
           try { r.send(JSON.stringify({ type: 'sender-disconnected' })); } catch (_) {}
@@ -799,7 +812,7 @@ wss.on('connection', (ws) => {
         if (realReceiverId) {
           scheduleReceiverGrace(currentRoom, realReceiverId);
           if (room._meta) roomStore.touchSlot(room._meta, realReceiverId);
-          persistRoom(currentRoom);
+          touchRoomActivity(currentRoom);
         }
         appendDebugLog('server', 'Receiver disconnected (grace)', {
           room: currentRoom,

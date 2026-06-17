@@ -21,20 +21,14 @@ description: >-
 | 服务端 | `appendDebugLog(source, message, meta)` → `logs/debug.log` + 内存 ring |
 | tag 常用 | `ice` `network` `media` `session` `version` `recover` |
 
-### 公网查询（经 Nginx → 30001）
+### 本机查询（SSH 到服务器）
 
 ```bash
-# 最近日志
 curl -s "http://127.0.0.1:30001/api/debug/logs?limit=300&room=房间码"
-
-# 按 tag
-curl -s "http://127.0.0.1:30001/api/debug/logs?limit=200&tag=network&room=房间码"
-
-# 房间在线状态
 curl -s "http://127.0.0.1:30001/api/status"
 ```
 
-线上：`https://www.u1w2.com/api/debug/logs?...`（若设 `DEBUG_LOG_TOKEN` 需加 `&token=`）
+公网 `https://www.u1w2.com/api/debug/*` 与 `/api/status` 已关闭，勿使用公网 URL。
 
 **必须自行拉日志分析**，不要只靠用户口述。
 
