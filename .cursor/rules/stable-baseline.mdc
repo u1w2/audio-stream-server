@@ -6,7 +6,7 @@ alwaysApply: true
 # 稳定基线 V6.22（当前回滚点）
 
 **定型日期**：2026-06-17  
-**Git tag**：`v6.22-stable` @ `bcded88`  
+**Git tag**：`v6.22-stable`（含基线说明 commit）  
 **客户端版本字符串**：
 - Sender：`V6.22-low-latency`
 - Receiver：`V6.20-room-heartbeat`
