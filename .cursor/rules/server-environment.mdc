@@ -1,0 +1,55 @@
+---
+description: www.u1w2.com 生产服务器、NGINX 拓扑与操作禁区
+alwaysApply: true
+---
+
+# 生产服务器环境
+
+**宿主**：www.u1w2.com（Cursor 工作区 `/home/user`）  
+**维护项目**：`/home/user/audio-stream`
+
+## 端口与服务
+
+| 服务 | 端口 | 状态 | 说明 |
+|------|------|------|------|
+| audio-stream | 30001 | **运行中** | Node `server.js`，对外主站 |
+| OpenWebUI | 3000 | **已停用** | 勿默认启动或改反代 |
+
+## systemd（audio-stream）
+
+- Unit：`/etc/systemd/system/audio-stream.service`
+- 工作目录：`/home/user/audio-stream`
+- 启动：`/usr/local/bin/node server.js`
+- 环境：`PORT=30001`，`NODE_ENV=production`
+
+```bash
+systemctl status audio-stream
+systemctl restart audio-stream
+journalctl -u audio-stream -f
+```
+
+## NGINX
+
+- 主配置：`/etc/nginx/nginx.conf`
+- 站点目录：`/etc/nginx/conf.d/`
+
+| 配置文件 | 域名 | 反代目标 | 备注 |
+|----------|------|----------|------|
+| `u1w2.com.conf` | `www.u1w2.com`、`u1w2.com` | `127.0.0.1:30001` | **主站 audio-stream**；WebSocket upgrade；`proxy_read_timeout 86400`；禁用缓存 |
+| `open.u1w2.com.conf` | `open.u1w2.com` | `127.0.0.1:3000` | OpenWebUI，**已停用** |
+
+- SSL：`/etc/ssl/u1w2/www.u1w2.com.pem` + `.key`
+- 改配置后：`nginx -t && systemctl reload nginx`
+
+## 操作禁区
+
+- **不要**把 `u1w2.com.conf` 反代改到 3000 或其他端口，除非用户明确要求
+- **不要**重启/部署 OpenWebUI 或修改 `open.u1w2.com.conf`，除非用户明确要求
+- **不要**把 audio-stream 端口改离 `30001`（与 Nginx、systemd 绑定）
+- **不要**执行 `/home/user/start_openwebui.sh` 等 OpenWebUI 脚本，除非用户明确要求
+- 部署 audio-stream：改代码 → `systemctl restart audio-stream`；有实质改动再 `git commit` + `push`
+
+## 相关路径（非本项目，勿动）
+
+- OpenWebUI：`/home/user/openwebui`
+- OpenWebUI 数据：`/home/user/openwebui-data`

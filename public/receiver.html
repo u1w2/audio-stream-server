@@ -240,9 +240,7 @@ function sendLeave() {
     try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
   }
 }
-
-window.addEventListener('pagehide', sendLeave);
-window.addEventListener('beforeunload', sendLeave);
+// 刷新/关页仅触发 WS close，走服务端 grace 保留 slot；勿在此 sendLeave（会 removeSlot 导致刷新后会话已过期）
 
 // Store code from URL
 let pendingCode = null;
@@ -260,6 +258,12 @@ function setTurnUI(on) {
   }
 }
 
+function getNetworkHint() {
+  const c = navigator.connection;
+  if (!c) return {};
+  return { netType: c.type || '', effectiveType: c.effectiveType || '' };
+}
+
 function notifyNetworkChanged() {
   if (!roomCode || !myReceiverId) return;
   if (isReceiverIceRestarting()) {
@@ -270,12 +274,50 @@ function notifyNetworkChanged() {
   _networkChangeTimer = setTimeout(() => {
     _networkChangeTimer = null;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'network-changed', receiverId: myReceiverId }));
+      const hint = getNetworkHint();
+      _lastNetworkChangedAt = Date.now();
+      suppressConnectionLost(12000);
+      logToServer('发送 network-changed netType=' + (hint.netType || '?'), 'network');
+      ws.send(JSON.stringify({
+        type: 'network-changed',
+        receiverId: myReceiverId,
+        ...hint,
+      }));
+      scheduleNetworkRecoveryWatchdog();
     }
   }, 200);
 }
 
+function scheduleNetworkRecoveryWatchdog() {
+  if (_networkRecoveryTimer) clearTimeout(_networkRecoveryTimer);
+  _networkRecoveryTimer = setTimeout(() => {
+    _networkRecoveryTimer = null;
+    const ice = p2pPC ? p2pPC.iceConnectionState : 'none';
+    if (ice === 'connected' || ice === 'completed') return;
+    logToServer('切网后 ICE 未恢复，自动 reconnectWebRTC ice=' + ice, 'recover');
+    suppressConnectionLost(10000);
+    stopMediaWatchdog();
+    cleanupProbePC();
+    cleanupTurnProbePC();
+    closePCIntentionally();
+    isPlaying = false;
+    _reconnecting = false;
+    _receiverIceRestartUntil = 0;
+    document.getElementById('playHint').textContent = '重新连接...';
+    setStatus('buffering', '重连中...');
+    if (ws && ws.readyState === WebSocket.OPEN && roomCode) {
+      ws.send(JSON.stringify(buildJoinMessage(roomCode, {
+        replaceSession: false,
+        nickname: myNickname,
+        reconnectWebRTC: true,
+      })));
+    }
+  }, 6000);
+}
+
 let _networkChangeTimer = null;
+let _lastNetworkChangedAt = 0;
+let _networkRecoveryTimer = null;
 let _roomBroadcast = null;
 let _suppressConnectionLostUntil = 0;
 let _receiverIceRestartUntil = 0;
@@ -311,6 +353,10 @@ function setupRoomBroadcast(code) {
 
 function notifyConnectionLost() {
   if (Date.now() < _suppressConnectionLostUntil) return;
+  if (_lastNetworkChangedAt && Date.now() - _lastNetworkChangedAt < 12000) {
+    logToServer('近期已 network-changed，跳过 connection-lost', 'network');
+    return;
+  }
   if (isReceiverIceRestarting()) {
     logToServer('ICE restart 协商中，跳过 connection-lost', 'network');
     return;
@@ -492,7 +538,7 @@ function clearReceiverDisconnectTimer() {
 }
 
 function resumePlaybackAfterReconnect() {
-  if (_onTurn || turnProbePC) return;
+  if (turnProbePC) return;
   if (!p2pRemoteStream && p2pPC) {
     const receivers = p2pPC.getReceivers().filter(r => r.track && r.track.kind === 'audio');
     if (receivers.length) {
@@ -501,13 +547,21 @@ function resumePlaybackAfterReconnect() {
     }
   }
   if (!p2pRemoteStream) return;
-  logToServer('resumePlaybackAfterReconnect reconnecting=' + _reconnecting, 'media');
-  startPlayback(false);
-  document.getElementById('playHint').textContent = '';
-  setStatus('playing', '播放中');
+  const isTurn = !!(_onTurn || _lastOfferUseTURN);
+  logToServer('resumePlaybackAfterReconnect reconnecting=' + _reconnecting + ' isTurn=' + isTurn, 'media');
+  startPlayback(isTurn);
+  document.getElementById('playHint').textContent = isTurn ? 'TURN 中继（16kbps）' : '';
+  setStatus('playing', isTurn ? 'TURN 中继 📡' : '播放中');
 }
 
 function bindReceiverIceHandlers(pc, useTurn) {
+  pc.onicegatheringstatechange = () => {
+    if (pc._intentionalClose) return;
+    if (pc.iceGatheringState === 'complete' && useTurn) {
+      logToServer('TURN gathering complete ice=' + pc.iceConnectionState, 'ice');
+    }
+  };
+
   pc.oniceconnectionstatechange = () => {
     if (pc._intentionalClose) return;
     const ice = pc.iceConnectionState;
@@ -515,15 +569,17 @@ function bindReceiverIceHandlers(pc, useTurn) {
     logToServer('ice=' + ice + ' useTurn=' + useTurn, 'ice');
 
     if (ice === 'connected' || ice === 'completed') {
+      if (_networkRecoveryTimer) {
+        clearTimeout(_networkRecoveryTimer);
+        _networkRecoveryTimer = null;
+      }
       clearReceiverDisconnectTimer();
       _reconnecting = false;
       _receiverIceRestartUntil = 0;
       const isTurn = turnPath;
       setTurnUI(isTurn);
-      if (!isTurn) {
-        detectRelayMode();
-        resumePlaybackAfterReconnect();
-      }
+      if (!isTurn) detectRelayMode();
+      resumePlaybackAfterReconnect();
     } else if (ice === 'failed') {
       clearReceiverDisconnectTimer();
       _reconnecting = false;
@@ -534,9 +590,10 @@ function bindReceiverIceHandlers(pc, useTurn) {
         return;
       }
       if (!turnPath && !turnProbePC) {
+        _lastNetworkChangedAt = Date.now();
+        suppressConnectionLost(15000);
         logToServer('ice failed，通知 network-changed', 'network');
         notifyNetworkChanged();
-        notifyConnectionLost();
       } else if (turnPath && pc._createdAt && Date.now() - pc._createdAt < 12000) {
         logToServer('TURN 协商 failed（瞬态），等待 sender 重建', 'network');
       }
@@ -548,6 +605,8 @@ function bindReceiverIceHandlers(pc, useTurn) {
         return;
       }
       if (!turnPath && !turnProbePC) {
+        _lastNetworkChangedAt = Date.now();
+        suppressConnectionLost(15000);
         logToServer('ice disconnected，通知 network-changed', 'network');
         notifyNetworkChanged();
       }
@@ -585,7 +644,7 @@ function bindReceiverIceHandlers(pc, useTurn) {
 window.addEventListener('online', () => {
   if (roomCode && (!ws || ws.readyState !== WebSocket.OPEN)) {
     scheduleWsReconnect();
-  } else if (roomCode && ws && ws.readyState === WebSocket.OPEN && !_onTurn) {
+  } else if (roomCode && ws && ws.readyState === WebSocket.OPEN) {
     notifyNetworkChanged();
   }
 });
@@ -616,6 +675,13 @@ function buildJoinMessage(code, opts) {
   } else if (!allowMultiJoin) {
     msg.replaceSession = true;
   }
+  if (msg.resumeReceiverId && opts?.reconnectWebRTC !== false) {
+    msg.reconnectWebRTC = true;
+  }
+  if (opts && opts.reconnectWebRTC === false) {
+    delete msg.reconnectWebRTC;
+  }
+  Object.assign(msg, getNetworkHint());
   return msg;
 }
 
@@ -864,6 +930,7 @@ function scheduleWsReconnect() {
       ws.send(JSON.stringify(buildJoinMessage(roomCode, {
         replaceSession: false,
         nickname: storedNick,
+        reconnectWebRTC: false,
       })));
     }).catch(() => {
       _wsReconnecting = false;
@@ -925,6 +992,15 @@ function handleSignaling(msg) {
         return;
       }
       if (msg.code === 'session_expired' || msg.code === 'room_expired' || msg.code === 'room_not_found') {
+        if (msg.code === 'session_expired' && roomCode) {
+          // Token expired — retry as fresh join without resume tokens
+          clearReceiverSession(roomCode);
+          logToServer('session expired, retrying fresh join', 'session');
+          try {
+            ws.send(JSON.stringify(buildJoinMessage(roomCode, { replaceSession: false })));
+            return;
+          } catch (_) {}
+        }
         showJoinError(errText, msg.code);
         return;
       }
@@ -938,7 +1014,7 @@ function handleSignaling(msg) {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
       myNickname = msg.nickname || myNickname || myReceiverId;
       myJoinToken = msg.joinToken || myJoinToken;
-      logToServer('【版本】V6.15-session-resume joined id=' + myReceiverId + ' nick=' + myNickname + ' resumed=' + !!msg.resumed, 'version');
+      logToServer('【版本】V6.18-wifi-recover joined id=' + myReceiverId + ' nick=' + myNickname + ' resumed=' + !!msg.resumed, 'version');
       if (roomCode) {
         saveReceiverSession(roomCode, {
           receiverId: myReceiverId,
@@ -1046,6 +1122,7 @@ function handleSignaling(msg) {
         ws.send(JSON.stringify(buildJoinMessage(roomCode, {
           replaceSession: false,
           nickname: myNickname || getReceiverSession(roomCode)?.nickname,
+          reconnectWebRTC: true,
         })));
       }
       break;
@@ -1182,6 +1259,10 @@ function handleWebRTCOffer(msg) {
   if (p2pPC) {
     closePCIntentionally();
     isPlaying = false;
+  }
+
+  if (!msg.iceRestart) {
+    _receiverIceRestartUntil = 0;
   }
 
   _reconnecting = false;

@@ -1,0 +1,67 @@
+---
+description: 通用开发规范、分层约定与技术栈（audio-stream）
+alwaysApply: true
+---
+
+# 通用开发规范
+
+## 沟通与执行
+
+- **简体中文**回复
+- **真实环境**：自行跑命令排查，不靠猜测
+- **改代码前**先读项目结构，匹配现有风格与抽象层级
+
+## 改动原则
+
+- **最小改动**：只动与任务直接相关的代码
+- **不过度设计**：不提前抽象、不加无意义容错
+- **注释**：仅解释非显而易见的业务/技术细节
+
+## Git
+
+- 前缀：`add:` / `upd:` / `del:` / `fix:`（例：`fix: ICE 切网重连超时`）
+- **仅用户明确要求时**才 `commit` / `push`
+- Windows 下中文 commit：用 HEREDOC 或 `git commit -m "fix: ..."` 确保 UTF-8，避免乱码
+
+## 分层架构（禁止跨层）
+
+本项目为 **Node.js 单体信令服务**，映射如下：
+
+| 层级 | 职责 | 位置 |
+|------|------|------|
+| **路由** | HTTP 路径、WebSocket `msg.type` 分发 | `server.js`（`createServer`、WS `switch`） |
+| **服务** | 房间/信令/会话业务逻辑 | `server.js` 内函数；`lib/debug-tunnel.js` |
+| **数据访问** | 持久化、日志 I/O | `lib/room-store.js`、`lib/debug-log.js` |
+
+- 路由层：解析请求 → 调服务 → 写响应，**不写**文件/复杂业务
+- 服务层：不直接 `fs.readFile` 房间数据（走 `room-store`）；不写 HTTP status
+- 客户端：`public/sender.html`、`public/receiver.html`（内联 JS + WebRTC），工具 `public/debug-anchor.js`
+- **禁止**：在 `room-store` 里发 WebSocket；在 HTML 里直接读写 `data/rooms.json`
+
+## 技术栈
+
+- **运行时**：Node.js（`/usr/local/bin/node`），无 Express
+- **依赖**：`ws`（WebSocket）、`qrcode`
+- **客户端**：原生 HTML/CSS/JS + WebRTC（`getDisplayMedia`、RTCPeerConnection）
+- **信令**：WebSocket；音频 P2P/TURN，服务端仅中继信令与备用 WS 音频
+- **持久化**：`data/rooms.json`（`room-store`）
+- **测试**：`test-room-store.js`、`test-webrtc-check.js`、`test-session-resume.js`
+
+工作区另有 Python（OpenWebUI 等），**不在 audio-stream 维护范围内**。
+
+## 调试与日志
+
+- 临时排查：写 `logs/debug.log`（`appendDebugLog` / `logToServer` / `DebugAnchor.logAnchor`）
+- 研发期锚点：登记 `debug-anchors/INDEX.md`，见 `debug-anchors.mdc`
+- **问题解决后删除**临时日志与锚点代码，勿留调试打印
+
+## 性能
+
+- 向多 receiver **广播**信令：遍历 `room.receivers` 同步 `send`，保持轻量；避免在热路径做同步大文件 I/O
+- 日志写盘：`appendFile` 异步，不阻塞事件循环
+- 批量/重 I/O 勿阻塞 Node 主线程；必要时拆到 `setImmediate` 或独立模块
+
+## 部署（摘要）
+
+- 改代码 → `systemctl restart audio-stream`
+- 详情见 `server-environment.mdc`、`deployment.mdc`

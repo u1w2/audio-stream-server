@@ -68,6 +68,7 @@ const server = http.createServer((req, res) => {
       room: query.get('room'),
       since: query.get('since'),
       tag: query.get('tag'),
+      anchor: query.get('anchor'),
     });
     res.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
@@ -199,7 +200,7 @@ function touchRoomActivity(code) {
   persistRoom(code);
 }
 
-function sendPeerReady(room, code, receiverId, nickname) {
+function sendPeerReady(room, code, receiverId, nickname, extra) {
   const count = room.receivers.length;
   room.sender?.send(JSON.stringify({
     type: 'peer-ready',
@@ -207,6 +208,7 @@ function sendPeerReady(room, code, receiverId, nickname) {
     receiverId,
     nickname: nickname || receiverId,
     resuming: true,
+    reconnectWebRTC: !!(extra && extra.reconnectWebRTC),
   }));
 }
 
@@ -633,6 +635,8 @@ wss.on('connection', (ws) => {
           receiverId,
           nickname,
           resuming: resumed,
+          reconnectWebRTC: !!msg.reconnectWebRTC,
+          netType: msg.netType || '',
         }));
         appendDebugLog('server', `Receiver joined ${code}`, {
           room: code,

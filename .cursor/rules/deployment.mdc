@@ -5,15 +5,28 @@ alwaysApply: true
 
 # audio-stream 部署与调试
 
+> 服务器、NGINX、端口、操作禁区见 `.cursor/rules/server-environment.mdc`
+
 ## 公网部署
 
 - **对外域名**：https://www.u1w2.com
-- **反向代理**：Nginx 转发到 Node 进程
-- **应用端口**：`30001`（`PORT=30001`，Nginx 对外 443/80）
+- **反向代理**：`conf.d/u1w2.com.conf` → `127.0.0.1:30001`
+- **应用端口**：`30001`（`PORT=30001`；Nginx 对外 80→301、443）
 - **信令**：WebSocket 经 Nginx 到同一 Node 服务
 - **默认 host**（二维码/房间 URL）：`server.js` 中 fallback 为 `www.u1w2.com`
 
 本地/测试可参考 `test-webrtc-check.js` 使用 `ws://127.0.0.1:30001`。
+
+## 部署流程
+
+```bash
+cd /home/user/audio-stream
+# 改代码后
+systemctl restart audio-stream
+systemctl status audio-stream
+# 有实质改动
+git add ... && git commit -m "fix: ..." && git push origin main
+```
 
 ## Git 流程
 
@@ -52,7 +65,8 @@ alwaysApply: true
 | JSON 查询最近日志 | `https://www.u1w2.com/api/debug/logs?limit=500&room=ABCDE` |
 | 下载 NDJSON 文件 | `https://www.u1w2.com/api/debug/logs/download` |
 | 按角色过滤 | `?role=sender` / `?role=receiver` / `?role=signal` |
-| 按埋点 tag | `?tag=ice` / `?tag=webrtc` / `?tag=media` / `?tag=version` / `?tag=session` |
+| 按埋点 tag | `?tag=ice` / `?tag=webrtc` / `?tag=media` / `?tag=version` / `?tag=session` / `?tag=anchor` |
+| 按锚点 ID | `?anchor=ICE-003`（研发期临时锚点，见 `debug-anchors/INDEX.md`） |
 
 若服务器设置了环境变量 **`DEBUG_LOG_TOKEN`**，上述 URL 需加 `&token=你的token`。
 
