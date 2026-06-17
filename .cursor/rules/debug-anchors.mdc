@@ -1,38 +1,27 @@
 ---
-description: 研发期调试锚点登记、打日志与 sender/receiver 隧道约定
+description: 研发期调试锚点登记、打日志与移除约定（详见 .cursor/skills/audio-stream-debug/SKILL.md）
 alwaysApply: true
 ---
 
 # 调试锚点（研发期）
 
-网站未推广，处于研发阶段。排查需求/Bug 时可加**临时锚点**；所有锚点必须在 `debug-anchors/INDEX.md` 登记，便于按清单移除。
+网站未推广。排查 Bug 时可加**临时锚点**；必须在 `debug-anchors/INDEX.md` 登记，问题解决后按清单移除。
 
-## 专用目录
+> 完整流程见技能：**audio-stream-debug**（`.cursor/skills/audio-stream-debug/SKILL.md`）
 
-`debug-anchors/` — 锚点登记表、调查笔记、扫描脚本（**移除锚点前先看 INDEX.md**）
-
-## 客户端 API（已加载 `public/debug-anchor.js`）
+## 轻量锚点（当前默认）
 
 ```javascript
-// 单端日志，写入 debug.log，tag=anchor
-DebugAnchor.logAnchor('ICE-003', { ice, deviceId }, 'anchor');
-
-// 经服务端隧道传到对端（并记 signal 日志）
-DebugAnchor.sendTunnel({ anchorId: 'ICE-003', data: { ice }, targetReceiverId });
+logToServer('@anchor:NET-002 描述 key=' + value, 'anchor');
 ```
 
-## 查询
+查询：`/api/debug/logs?tag=anchor` 或 `?anchor=NET-002&room=ABCDE`
 
-- 全部锚点：`/api/debug/logs?tag=anchor`
-- 指定 ID：`/api/debug/logs?anchor=ICE-003&room=ABCDE`
+## 必做
 
-## 新增锚点必做
-
-1. `debug-anchors/INDEX.md` 登记 ID、文件、目的
-2. 代码中用同一 ID
-3. 问题解决后标 `removed`，删代码，跑 `./debug-anchors/list-anchors.sh`
+1. 新增 → `INDEX.md` 登记
+2. 关闭 → 标 `removed`，删代码，跑 `./debug-anchors/list-anchors.sh`
 
 ## 勿做
 
-- 勿在未登记的情况下散落 `@anchor:` 或 `logAnchor` 调用
-- 问题关闭后勿留锚点代码；勿把 `logs/debug.log` 提交 git
+- 未登记就加锚点；关闭后留残留；提交 `logs/debug.log`

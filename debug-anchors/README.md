@@ -29,7 +29,12 @@
 1. 打开 `INDEX.md`，将对应行标为 `removed` 并注明日期
 2. 按「代码位置」列删除 `logAnchor` / `sendTunnel` / 注释 `// @anchor:ID`
 3. 运行 `./debug-anchors/list-anchors.sh` 确认无残留
-4. 若无活跃锚点，可考虑移除 `public/debug-anchor.js`、`lib/debug-tunnel.js` 及 server 中的 `debug-tunnel` 分支
+4. 若无活跃锚点，可移除临时基础设施（`public/debug-anchor.js`、`lib/debug-tunnel.js`、server `debug-tunnel`）；轻量锚点仅用 `logToServer('@anchor:ID ...', 'anchor')` 即可
+
+## 技能与规则
+
+- **Cursor 技能**：`.cursor/skills/audio-stream-debug/SKILL.md`（完整排查流程）
+- **Cursor 规则**：`.cursor/rules/debug-anchors.mdc`（会话内自动提醒）
 
 ## 相关文件
 
@@ -38,5 +43,3 @@
 | `INDEX.md` | 锚点总表（**移除时先看此文件**） |
 | `_template.md` | 单次调查笔记模板 |
 | `list-anchors.sh` | 扫描代码中的锚点引用 |
-| `public/debug-anchor.js` | 客户端 API |
-| `lib/debug-tunnel.js` | 服务端隧道中继 |
