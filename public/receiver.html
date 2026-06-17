@@ -1014,7 +1014,7 @@ function handleSignaling(msg) {
       myReceiverId = msg.receiverId || ('device-' + Date.now().toString(36));
       myNickname = msg.nickname || myNickname || myReceiverId;
       myJoinToken = msg.joinToken || myJoinToken;
-      logToServer('【版本】V6.18-wifi-recover joined id=' + myReceiverId + ' nick=' + myNickname + ' resumed=' + !!msg.resumed, 'version');
+      logToServer('【版本】V6.19-room-reuse joined id=' + myReceiverId + ' nick=' + myNickname + ' resumed=' + !!msg.resumed, 'version');
       if (roomCode) {
         saveReceiverSession(roomCode, {
           receiverId: myReceiverId,

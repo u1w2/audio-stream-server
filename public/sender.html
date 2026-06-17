@@ -137,20 +137,87 @@ const SENDER_SESSION_KEY = 'audio-stream-sender';
 
 function saveSenderSession(data) {
   try {
-    sessionStorage.setItem(SENDER_SESSION_KEY, JSON.stringify(data));
+    const prev = loadSenderSession() || {};
+    localStorage.setItem(SENDER_SESSION_KEY, JSON.stringify({ ...prev, ...data, hasRoom: true }));
   } catch (_) {}
 }
 
 function loadSenderSession() {
   try {
-    return JSON.parse(sessionStorage.getItem(SENDER_SESSION_KEY) || 'null');
+    const fromLocal = localStorage.getItem(SENDER_SESSION_KEY);
+    if (fromLocal) return JSON.parse(fromLocal);
+    const legacy = sessionStorage.getItem(SENDER_SESSION_KEY);
+    if (legacy) {
+      localStorage.setItem(SENDER_SESSION_KEY, legacy);
+      sessionStorage.removeItem(SENDER_SESSION_KEY);
+      return JSON.parse(legacy);
+    }
+    return null;
   } catch (_) {
     return null;
   }
 }
 
 function clearSenderSession() {
-  try { sessionStorage.removeItem(SENDER_SESSION_KEY); } catch (_) {}
+  try {
+    localStorage.removeItem(SENDER_SESSION_KEY);
+    sessionStorage.removeItem(SENDER_SESSION_KEY);
+  } catch (_) {}
+}
+
+function hasSenderRoomSession(sess) {
+  return !!(sess?.roomCode && sess?.senderToken);
+}
+
+function showSenderRoomUI() {
+  document.getElementById('stepCreate')?.classList.add('hidden');
+  document.getElementById('stepStreaming')?.classList.remove('hidden');
+  document.getElementById('tipBox')?.classList.add('hidden');
+}
+
+function showRoomQr(msg) {
+  if (msg.qrDataUrl) {
+    document.getElementById('qrContainer').innerHTML =
+      `<img src="${msg.qrDataUrl}" alt="QR Code" style="width:200px;height:200px;">`;
+  } else if (msg.receiverUrl) {
+    document.getElementById('qrContainer').innerHTML =
+      `<div style="color:#999; font-size:13px; word-break:break-all;">${msg.receiverUrl}</div>`;
+  } else {
+    document.getElementById('qrContainer').innerHTML =
+      `<div style="color:#999; font-size:13px;">二维码生成失败</div>`;
+  }
+}
+
+async function resumeExistingRoom(options = {}) {
+  const { requestAudio = false } = options;
+  const sess = loadSenderSession();
+  if (!hasSenderRoomSession(sess)) return false;
+
+  roomCode = sess.roomCode;
+  senderToken = sess.senderToken;
+  updateRoomCodeDisplay(roomCode);
+  showSenderRoomUI();
+
+  if (requestAudio) {
+    setStatus('connected', '正在请求音频权限...');
+    const audioOk = await requestAudioSource();
+    if (!audioOk && sess.wasStreaming) {
+      setStatus('connected', '请重新选择音频源以恢复推流');
+    }
+  }
+
+  try {
+    await connectWS();
+    ws.send(JSON.stringify({ type: 'resume-sender', code: roomCode, senderToken }));
+    const statusText = sess.wasStreaming
+      ? (localAudioTrack ? '正在恢复推流...' : '已恢复房间，请重新选择音频源')
+      : '已恢复房间，等待扫码...';
+    setStatus('connected', statusText);
+    return true;
+  } catch (_) {
+    scheduleSenderReconnect();
+    return true;
+  }
 }
 
 function isP2PConnected(deviceId) {
@@ -578,6 +645,12 @@ function connectWS() {
 
 async function createRoom() {
   document.getElementById('btnCreate').disabled = true;
+  const sess = loadSenderSession();
+  if (hasSenderRoomSession(sess)) {
+    const resumed = await resumeExistingRoom({ requestAudio: true });
+    if (resumed) return;
+    document.getElementById('btnCreate').disabled = false;
+  }
   setStatus('connected', '正在请求音频权限...');
 
   let maxConnections = parseInt(document.getElementById('inputMaxConn')?.value, 10) || 5;
@@ -600,7 +673,7 @@ async function createRoom() {
   try {
     await connectWS();
     setStatus('connected', '正在创建房间...');
-    logToServer('【版本】V6.18-wifi-recover 已加载', 'version');
+    logToServer('【版本】V6.19-room-reuse 已加载', 'version');
     ws.send(JSON.stringify({ type: 'create', host: location.host, p2pOnly: true, maxConnections }));
   } catch (err) {
     setStatus('error', '创建失败');
@@ -640,20 +713,12 @@ function handleSignaling(msg) {
         roomCode,
         senderToken,
         wasStreaming: false,
+        hasRoom: true,
       });
-      document.getElementById('stepCreate').classList.add('hidden');
-      document.getElementById('stepStreaming').classList.remove('hidden');
-      document.getElementById('tipBox').classList.add('hidden');
+      showSenderRoomUI();
       setStatus('connected', '房间已创建，等待手机扫码...');
       Object.keys(_relayRetryTimer).forEach(did => clearP2PRetry(did));
-
-      if (msg.qrDataUrl) {
-        document.getElementById('qrContainer').innerHTML =
-          `<img src="${msg.qrDataUrl}" alt="QR Code" style="width:200px;height:200px;">`;
-      } else {
-        document.getElementById('qrContainer').innerHTML =
-          `<div style="color:#999; font-size:13px;">二维码生成失败</div>`;
-      }
+      showRoomQr(msg);
       break;
 
     case 'sender-resumed': {
@@ -661,10 +726,12 @@ function handleSignaling(msg) {
       roomCode = msg.code || roomCode;
       updateRoomCodeDisplay(roomCode);
       logToServer('sender-resumed receivers=' + (msg.receivers?.length || 0), 'session');
+      showRoomQr(msg);
       saveSenderSession({
         roomCode,
         senderToken,
         wasStreaming: isStreaming || _wasStreamingBeforeDisconnect,
+        hasRoom: true,
       });
       const list = msg.receivers || [];
       list.forEach((r) => {
@@ -863,6 +930,16 @@ function handleSignaling(msg) {
       break;
 
     case 'error':
+      if (msg.code === 'room_not_found' || msg.code === 'room_expired') {
+        clearSenderSession();
+        roomCode = null;
+        senderToken = null;
+        document.getElementById('stepCreate')?.classList.remove('hidden');
+        document.getElementById('stepStreaming')?.classList.add('hidden');
+        document.getElementById('btnCreate').disabled = false;
+        setStatus('connected', msg.message || '房间已失效，请重新创建');
+        break;
+      }
       alert(msg.message);
       break;
   }
@@ -1978,6 +2055,9 @@ function stopStreaming() {
   senderToken = null;
   updateDeviceList();
   document.getElementById('btnStop').classList.add('hidden');
+  document.getElementById('stepCreate')?.classList.remove('hidden');
+  document.getElementById('stepStreaming')?.classList.add('hidden');
+  document.getElementById('btnCreate').disabled = false;
   setStatus('connected', '已停止推流');
 }
 
@@ -1997,23 +2077,9 @@ function setStatus(state, text) {
 
 window.addEventListener('DOMContentLoaded', async () => {
   const sess = loadSenderSession();
-  if (!sess?.roomCode || !sess?.senderToken || !sess?.wasStreaming) return;
-  roomCode = sess.roomCode;
-  updateRoomCodeDisplay(roomCode);
-  senderToken = sess.senderToken;
-  _wasStreamingBeforeDisconnect = true;
-  if (!localAudioTrack || localAudioTrack.readyState !== 'live') {
-    setStatus('connected', '请重新选择音频源以恢复推流');
-    return;
-  }
-  try {
-    document.getElementById('stepCreate')?.classList.add('hidden');
-    document.getElementById('stepStreaming')?.classList.remove('hidden');
-    await connectWS();
-    ws.send(JSON.stringify({ type: 'resume-sender', code: roomCode, senderToken }));
-  } catch (_) {
-    scheduleSenderReconnect();
-  }
+  if (!hasSenderRoomSession(sess)) return;
+  if (sess.wasStreaming) _wasStreamingBeforeDisconnect = true;
+  await resumeExistingRoom({ requestAudio: !!sess.wasStreaming });
 });
 </script>
 </body>

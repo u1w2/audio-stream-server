@@ -448,11 +448,15 @@ wss.on('connection', (ws) => {
 
       case 'resume-sender': {
         const code = msg.code?.toUpperCase();
-        const room = rooms[code];
         const meta = getMeta(code);
-        if (!room || !meta) {
+        if (!meta) {
           ws.send(JSON.stringify({ type: 'error', message: '房间不存在', code: 'room_not_found' }));
           return;
+        }
+        let room = rooms[code];
+        if (!room) {
+          rooms[code] = createMemoryRoomFromRecord(meta);
+          room = rooms[code];
         }
         if (!roomStore.safeEqual(msg.senderToken || '', meta.senderToken)) {
           ws.send(JSON.stringify({ type: 'error', message: '发送端凭证无效', code: 'invalid_token' }));
@@ -476,10 +480,16 @@ wss.on('connection', (ws) => {
         touchRoomActivity(code);
 
         const receiverSummaries = roomStore.listReceiverSummaries(meta);
+        const host = meta.host || msg.host || DEFAULT_IP;
+        const ts = Date.now();
+        const receiverUrl = `https://${host}/receiver?code=${code}&t=${ts}`;
+        const qrDataUrl = await generateQRDataURL(receiverUrl);
         ws.send(JSON.stringify({
           type: 'sender-resumed',
           code,
           receivers: receiverSummaries,
+          qrDataUrl,
+          receiverUrl,
         }));
 
         for (const rws of room.receivers) {
