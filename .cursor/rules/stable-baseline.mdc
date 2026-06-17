@@ -1,41 +1,51 @@
 ---
-description: P2P 切网稳定版基线 V6.14，大改动前可回滚到此点
+description: P2P 可用稳定版基线 V6.22，大改动前可回滚到此点（上一节点 V6.14）
 alwaysApply: true
 ---
 
-# 稳定基线 V6.14（定型版）
+# 稳定基线 V6.22（当前回滚点）
 
-**定型日期**：2026-06-16  
-**客户端版本字符串**：`V6.14-replace-join`（sender/receiver `logToServer` version tag）
+**定型日期**：2026-06-17  
+**Git tag**：`v6.22-stable` @ `bcded88`  
+**客户端版本字符串**：
+- Sender：`V6.22-low-latency`
+- Receiver：`V6.20-room-heartbeat`
 
 ## 回滚到此点
 
 ```bash
 git fetch origin
-git checkout v6.14-stable
-# 或仅查看/对比：git diff v6.14-stable..HEAD
-# 硬回滚工作区（慎用）：git reset --hard v6.14-stable
+git checkout v6.22-stable
+# 或仅查看/对比：git diff v6.22-stable..HEAD
+# 硬回滚工作区（慎用）：git reset --hard v6.22-stable
 ```
 
-部署后日志应出现 `【版本】V6.14-replace-join`。
+部署后 sender 日志应出现 `【版本】V6.22-low-latency 已加载`。
 
 ## 本基线已验证能力
 
-- 移动 ↔ WiFi P2P 切网恢复（JJ46S、RLMPC 等房间日志）
-- 切网 ICE 协商延长等待，避免误进 TURN / 界面 P2P 无声
-- TURN relay 不可用时回退 P2P，不死循环
-- 重复扫码 join：`replaceSession` 踢旧 receiver，sender 单设备
-- 调试：`GET /api/debug/logs?limit=500&room=房间码`
+- V6.14 全部能力（切网 P2P、TURN 回退、replace-join 踢旧 receiver）
+- 会话 JSON 保活（`data/rooms.json`）、clientId、房间内昵称与听众上限
+- 同一浏览器刷新复用房间码，避免重复创建假房间
+- 管理 API 内网化、房间心跳过期、sender 分享链接与界面重构
+- P2P 低延迟 Opus 调优 + 接收端 jitter buffer（20ms），保留立体声
+- 调试：`GET /api/debug/logs?limit=500&room=房间码`（本机 127.0.0.1:30001）
 
-## 关键 commit 链（V6.12 → V6.14）
+## 关键 commit 链（V6.14 → V6.22）
 
 | 版本 | 说明 |
 |------|------|
-| V6.12 | 切网完整 P2P 重连，TURN 不可用回退 |
-| V6.13 | ICE 协商延长等待，切网保护窗 |
-| V6.14 | 重复 join 踢旧 receiver，`dropReceiver` |
+| V6.15 | 会话保活、clientId、昵称、听众上限 |
+| V6.20 | 管理 API 内网化、房间心跳、sender UI 重构 |
+| V6.22 | Opus 低延迟调优 + jitter buffer，立体声 |
+
+## 上一基线（归档）
+
+| Tag | 说明 |
+|-----|------|
+| `v6.14-stable` | 第一节点：P2P 切网 + replace-join（2026-06-16） |
 
 ## 后续大改动注意
 
-- 大改 WebRTC/信令/切网逻辑前，先 `git branch feature/xxx` 或确认可 `checkout v6.14-stable` 恢复
+- 大改 WebRTC/信令/切网/会话逻辑前，先 `git branch feature/xxx` 或确认可 `checkout v6.22-stable` 恢复
 - 勿在未备份前提下 force push 覆盖含此 tag 的历史

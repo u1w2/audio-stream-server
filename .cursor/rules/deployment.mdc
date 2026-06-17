@@ -36,9 +36,9 @@ git add ... && git commit -m "fix: ..." && git push origin main
 
 ## 稳定基线（回滚点）
 
-- **Tag**：`v6.14-stable`（定型版 V6.14-replace-join，2026-06-16）
-- **当前开发**：V6.15-session-resume（会话 JSON 保活 + clientId + 昵称）
-- **回滚**：`git checkout v6.14-stable` 后部署
+- **当前 Tag**：`v6.22-stable`（定型版 V6.22-low-latency，2026-06-17）
+- **上一节点**：`v6.14-stable`（V6.14-replace-join，2026-06-16）
+- **回滚**：`git checkout v6.22-stable` 后 `systemctl restart audio-stream`
 - **详情**：见 `.cursor/rules/stable-baseline.mdc`
 
 ## V6.15 会话持久化
