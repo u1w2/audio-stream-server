@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>AudioStream Engine</title>
+</head>
+<body>
+<script>
+(function() {
+  'use strict';
+
+  var ws = null;
+  var pcs = {};
+  var audioStream = null;
+  var localAudioTrack = null;
+  var pendingReceivers = [];
+  var audioReady = false;
+
+  var audioContext = null;
+  var scriptNode = null;
+  var destination = null;
+  var pcmRing = [];
+  var currentPacket = null;
+  var readIndex = 0;
+  var sampleRate = 48000;
+  var channels = 2;
+  var bufferSize = 4096;
+
+  var ICE_SERVERS = [
+    { urls: 'stun:stun.qq.com:3478' },
+    { urls: 'stun:stun.aliyun.com:3478' },
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'turn:39.101.174.208:3478', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
+    { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' }
+  ];
+  var STUN_ONLY = ICE_SERVERS.filter(function(s) { return String(s.urls).indexOf('stun:') === 0; });
+  var OFFER_OPTIONS = { offerToReceiveAudio: false, offerToReceiveVideo: false, voiceActivityDetection: false };
+
+  function log(msg) {
+    console.log('[sender-engine] ' + msg);
+    try {
+      fetch('/engine-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: msg })
+      }).catch(function() {});
+    } catch (_) {}
+  }
+
+  function decodeBase64ToInt16(b64) {
+    var binary = atob(b64);
+    var len = binary.length;
+    var bytes = new Uint8Array(len);
+    for (var i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    return new Int16Array(bytes.buffer);
+  }
+
+  function readPcmSample() {
+    while (true) {
+      if (!currentPacket || readIndex >= currentPacket.length) {
+        if (pcmRing.length === 0) return 0;
+        currentPacket = pcmRing.shift();
+        readIndex = 0;
+      }
+      if (currentPacket) {
+        return currentPacket[readIndex++] / 32768;
+      }
+      return 0;
+    }
+  }
+
+  function setupNativeAudio(cfg) {
+    if (audioReady) return Promise.resolve();
+    sampleRate = cfg.sampleRate || 48000;
+    channels = cfg.channels || 2;
+    return new Promise(function(resolve, reject) {
+      try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: sampleRate });
+        destination = audioContext.createMediaStreamDestination();
+        scriptNode = audioContext.createScriptProcessor(bufferSize, 0, channels);
+        scriptNode.onaudioprocess = function(e) {
+          var frames = e.outputBuffer.length;
+          for (var i = 0; i < frames; i++) {
+            for (var ch = 0; ch < channels; ch++) {
+              e.outputBuffer.getChannelData(ch)[i] = readPcmSample();
+            }
+          }
+        };
+        scriptNode.connect(destination);
+        audioStream = destination.stream;
+        localAudioTrack = audioStream.getAudioTracks()[0] || null;
+        var resume = audioContext.resume ? audioContext.resume() : Promise.resolve();
+        resume.then(function() {
+          audioReady = !!localAudioTrack;
+          if (!audioReady) {
+            reject(new Error('no audio track'));
+            return;
+          }
+          log('native audio track ready ' + sampleRate + 'Hz ' + channels + 'ch state=' + audioContext.state);
+          try {
+            if (window.chrome && chrome.webview) {
+              chrome.webview.postMessage('track-ready');
+            }
+          } catch (_) {}
+          flushPendingReceivers();
+          resolve();
+        }).catch(reject);
+      } catch (err) {
+        log('setupNativeAudio failed ' + (err && err.message ? err.message : err));
+        reject(err);
+      }
+    });
+  }
+
+  window.__setupNativeAudio = function(sr, ch) {
+    return setupNativeAudio({ sampleRate: sr, channels: ch });
+  };
+
+  function onHostMessage(raw) {
+    var msg = raw;
+    if (typeof raw === 'string') {
+      try { msg = JSON.parse(raw); } catch (_) { return; }
+    }
+    if (!msg || !msg.type) return;
+
+    if (msg.type === 'audio-config') {
+      setupNativeAudio(msg).catch(function() {});
+      return;
+    }
+    if (msg.type === 'pcm' && msg.data) {
+      if (!audioReady) return;
+      pcmRing.push(decodeBase64ToInt16(msg.data));
+      while (pcmRing.length > 16) pcmRing.shift();
+    }
+  }
+
+  if (window.chrome && chrome.webview) {
+    chrome.webview.addEventListener('message', function(ev) {
+      onHostMessage(ev.data);
+    });
+    try {
+      chrome.webview.postMessage('engine-ready');
+      log('engine-ready sent');
+    } catch (_) {}
+  }
+
+  function tuneOpusSdp(sdp) {
+    if (!sdp) return sdp;
+    return sdp.replace(/a=fmtp:(\d+) ([^\r\n]+)/g, function(line, pt, params) {
+      if (sdp.indexOf('a=rtpmap:' + pt + ' opus/') === -1) return line;
+      var kept = params.split(';').filter(function(p) {
+        var k = p.split('=')[0].toLowerCase();
+        return ['minptime', 'ptime', 'maxplaybackrate'].indexOf(k) === -1;
+      });
+      kept.push('minptime=10', 'useinbandfec=1', 'maxplaybackrate=48000');
+      if (!kept.some(function(p) { return /^stereo=/i.test(p); })) kept.push('stereo=1');
+      return 'a=fmtp:' + pt + ' ' + kept.join(';');
+    });
+  }
+
+  function send(msg) {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+  }
+
+  function closePc(receiverId) {
+    var pc = pcs[receiverId];
+    if (pc) {
+      try { pc.close(); } catch (_) {}
+      delete pcs[receiverId];
+    }
+  }
+
+  async function createPeerConnection(receiverId, turn) {
+    if (!audioReady || !localAudioTrack || !audioStream) {
+      pendingReceivers.push(receiverId);
+      log('defer offer until native audio receiverId=' + receiverId);
+      return;
+    }
+    closePc(receiverId);
+    var pc = new RTCPeerConnection({ iceServers: turn ? ICE_SERVERS : STUN_ONLY });
+    pcs[receiverId] = pc;
+    pc.addTrack(localAudioTrack, audioStream);
+
+    pc.onicecandidate = function(e) {
+      if (e.candidate) {
+        send({ type: 'webrtc-ice', targetReceiverId: receiverId, candidate: e.candidate.toJSON() });
+      }
+    };
+    pc.onconnectionstatechange = function() {
+      log('[' + receiverId + '] pc=' + pc.connectionState);
+    };
+
+    var offer = await pc.createOffer(OFFER_OPTIONS);
+    offer.sdp = tuneOpusSdp(offer.sdp);
+    await pc.setLocalDescription(offer);
+    send({
+      type: 'webrtc-offer',
+      targetReceiverId: receiverId,
+      useTURN: !!turn,
+      sdp: pc.localDescription.toJSON()
+    });
+    log('[' + receiverId + '] offer sent');
+  }
+
+  function flushPendingReceivers() {
+    if (!audioReady || pendingReceivers.length === 0) return;
+    var ids = pendingReceivers.slice();
+    pendingReceivers = [];
+    ids.forEach(function(id) {
+      createPeerConnection(id, false).catch(function(err) {
+        log('flush offer failed ' + (err && err.message));
+      });
+    });
+  }
+
+  async function handleReceiverMessage(msg) {
+    var receiverId = msg.receiverId || msg.targetReceiverId;
+    if (msg.type === 'webrtc-answer' && receiverId) {
+      var pc = pcs[receiverId];
+      if (pc && msg.sdp) {
+        var sdp = msg.sdp;
+        if (typeof sdp === 'string') {
+          try { sdp = JSON.parse(sdp); } catch (_) {}
+        }
+        await pc.setRemoteDescription(sdp);
+        log('[' + receiverId + '] answer applied');
+      }
+      return;
+    }
+    if (msg.type === 'webrtc-ice' && receiverId) {
+      var pcIce = pcs[receiverId];
+      if (pcIce && msg.candidate) {
+        await pcIce.addIceCandidate(new RTCIceCandidate(msg.candidate));
+      }
+    }
+  }
+
+  function connectWs() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var url = proto + '//' + location.host + '/?role=sender';
+    log('connect ' + url);
+    ws = new WebSocket(url);
+    ws.onopen = function() { log('ws open'); };
+    ws.onmessage = function(e) {
+      var msg;
+      try { msg = JSON.parse(e.data); } catch (_) { return; }
+      if (msg.type === 'peer-ready' && msg.receiverId) {
+        log('peer-ready ' + msg.receiverId);
+        if (!audioReady) {
+          try {
+            if (window.chrome && chrome.webview) {
+              chrome.webview.postMessage('need-audio-config');
+            }
+          } catch (_) {}
+        }
+        createPeerConnection(msg.receiverId, false).catch(function(err) {
+          log('peer-ready failed ' + (err && err.message));
+        });
+        return;
+      }
+      if (msg.type === 'peer-left' && msg.receiverId) {
+        closePc(msg.receiverId);
+        return;
+      }
+      if (msg.receiverId || msg.type === 'webrtc-answer' || msg.type === 'webrtc-ice') {
+        handleReceiverMessage(msg).catch(function(err) {
+          log('handle msg failed ' + (err && err.message));
+        });
+      }
+    };
+    ws.onclose = function() {
+      log('ws closed, retry in 2s');
+      setTimeout(connectWs, 2000);
+    };
+  }
+
+  connectWs();
+})();
+</script>
+</body>
+</html>

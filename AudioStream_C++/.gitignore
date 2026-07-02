@@ -1,0 +1,9 @@
+/build/
+/out/
+/dist/
+/.vs/
+*.user
+*.suo
+CMakeUserPresets.json
+third_party/*.nupkg
+third_party/*.zip
