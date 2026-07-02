@@ -10,6 +10,7 @@
 #include <WebView2EnvironmentOptions.h>
 #include <WebView2.h>
 
+#include <atomic>
 #include <deque>
 #include <algorithm>
 #include <mutex>
@@ -24,9 +25,13 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr UINT kPcmFlushTimerId = 1;
-constexpr UINT kPcmFlushIntervalMs = 20;
+constexpr UINT kPcmFlushIntervalMs = 8;
 constexpr UINT kPushAudioConfigMsg = WM_APP + 46;
-constexpr size_t kMaxPcmBytesPerMessage = 24 * 1024;
+constexpr UINT kFlushPcmNowMsg = WM_APP + 47;
+// ~10 ms stereo PCM @ 48 kHz
+constexpr size_t kMaxPcmBytesPerMessage = 1920;
+// Cap queued PCM to ~60 ms
+constexpr int kMaxQueueMs = 100;
 
 std::string Base64Encode(const uint8_t* data, size_t len) {
   static const char kTable[] =
@@ -93,6 +98,29 @@ struct WebRtcEngine::Impl {
 
   std::mutex pcmMutex;
   std::deque<int16_t> pcmQueue;
+  std::atomic<bool> flushPosted{false};
+
+  size_t MaxQueuedSamples() const {
+    const int rate = sampleRate > 0 ? sampleRate : 48000;
+    const int ch = channels > 0 ? channels : 2;
+    return static_cast<size_t>(rate) * static_cast<size_t>(ch) * kMaxQueueMs / 1000;
+  }
+
+  size_t MinFlushSamples() const {
+    const int rate = sampleRate > 0 ? sampleRate : 48000;
+    const int ch = channels > 0 ? channels : 2;
+    return static_cast<size_t>(rate) * static_cast<size_t>(ch) / 100;  // 10 ms
+  }
+
+  void ScheduleFlush() {
+    if (hostWindow == nullptr) {
+      return;
+    }
+    bool expected = false;
+    if (flushPosted.compare_exchange_strong(expected, true)) {
+      PostMessageW(hostWindow, kFlushPcmNowMsg, 0, 0);
+    }
+  }
 
   void NotifyEvent(const std::string& event) {
     if (eventCallback) {
@@ -101,21 +129,30 @@ struct WebRtcEngine::Impl {
   }
 
   void EnqueuePcm(const int16_t* samples, size_t frameCount, int channelsCount) {
-    std::lock_guard<std::mutex> lock(pcmMutex);
-    const size_t sampleCount = frameCount * static_cast<size_t>(channelsCount);
-    pcmQueue.insert(pcmQueue.end(), samples, samples + sampleCount);
-    const size_t maxSamples = static_cast<size_t>(sampleRate) * static_cast<size_t>(channels) * 2;
-    while (pcmQueue.size() > maxSamples) {
-      pcmQueue.pop_front();
+    bool shouldFlush = false;
+    {
+      std::lock_guard<std::mutex> lock(pcmMutex);
+      const size_t sampleCount = frameCount * static_cast<size_t>(channelsCount);
+      pcmQueue.insert(pcmQueue.end(), samples, samples + sampleCount);
+      const size_t maxSamples = MaxQueuedSamples();
+      while (pcmQueue.size() > maxSamples) {
+        pcmQueue.pop_front();
+      }
+      shouldFlush = pcmQueue.size() >= MinFlushSamples();
+    }
+    if (shouldFlush) {
+      ScheduleFlush();
     }
   }
 
   void FlushPcmQueue() {
+    flushPosted.store(false);
     if (!webView) {
       return;
     }
 
     std::vector<int16_t> chunk;
+    bool hasMore = false;
     {
       std::lock_guard<std::mutex> lock(pcmMutex);
       if (pcmQueue.empty()) {
@@ -125,6 +162,7 @@ struct WebRtcEngine::Impl {
       const size_t take = std::min(pcmQueue.size(), maxSamples);
       chunk.assign(pcmQueue.begin(), pcmQueue.begin() + static_cast<std::ptrdiff_t>(take));
       pcmQueue.erase(pcmQueue.begin(), pcmQueue.begin() + static_cast<std::ptrdiff_t>(take));
+      hasMore = pcmQueue.size() >= MinFlushSamples();
     }
 
     const size_t frameCount = chunk.size() / static_cast<size_t>(channels);
@@ -135,6 +173,10 @@ struct WebRtcEngine::Impl {
     json << "{\"type\":\"pcm\",\"sampleRate\":" << sampleRate << ",\"channels\":" << channels
          << ",\"frames\":" << frameCount << ",\"data\":\"" << b64 << "\"}";
     PostJsonMessage(webView.Get(), json.str());
+
+    if (hasMore) {
+      ScheduleFlush();
+    }
   }
 
   void StartNativeCapture() {
@@ -174,6 +216,10 @@ struct WebRtcEngine::Impl {
   static LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     auto* impl = reinterpret_cast<Impl*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (msg == WM_TIMER && wparam == kPcmFlushTimerId && impl != nullptr) {
+      impl->FlushPcmQueue();
+      return 0;
+    }
+    if (msg == kFlushPcmNowMsg && impl != nullptr) {
       impl->FlushPcmQueue();
       return 0;
     }

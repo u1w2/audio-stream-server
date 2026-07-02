@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>音频播放</title>
+<script src="/webrtc-low-latency.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
@@ -101,6 +102,9 @@
   </div>
 
   <button class="btn btn-rejoin hidden" id="btnRejoin" onclick="rejoin()">重新连接</button>
+  <button class="btn btn-rejoin hidden" id="btnPlay" onclick="resumePlayback()">点击播放</button>
+
+  <audio id="p2pAudio" playsinline webkit-playsinline style="display:none"></audio>
 
   <div class="diag" id="diag"></div>
 </div>
@@ -111,7 +115,19 @@
 
   var pc = null, ws = null, code = '', receiverId = '';
   var audioCtx = null, analyserNode = null, meterInterval = null, joined = false;
+  var pendingCandidates = [];
+  var remoteStream = null;
+  var useTurnPath = false;
   var diagLines = [];
+
+  var ICE_SERVERS = [
+    { urls: 'stun:stun.qq.com:3478' },
+    { urls: 'stun:stun.aliyun.com:3478' },
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'turn:39.101.174.208:3478', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
+    { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' }
+  ];
+  var STUN_ONLY = ICE_SERVERS.filter(function(s) { return String(s.urls).indexOf('stun:') === 0; });
 
   var dot = document.getElementById('dot');
   var statusText = document.getElementById('statusText');
@@ -119,6 +135,8 @@
   var meterFill = document.getElementById('meterFill');
   var meterLabel = document.getElementById('meterLabel');
   var btnRejoin = document.getElementById('btnRejoin');
+  var btnPlay = document.getElementById('btnPlay');
+  var p2pAudio = document.getElementById('p2pAudio');
   var diag = document.getElementById('diag');
 
   function diagLog(tag, detail) {
@@ -145,39 +163,89 @@
         var k = p.split('=')[0].toLowerCase();
         return ['minptime', 'ptime', 'maxplaybackrate'].indexOf(k) === -1;
       });
-      kept.push('minptime=10', 'useinbandfec=1', 'maxplaybackrate=48000');
+      kept.push('minptime=10', 'ptime=10', 'useinbandfec=1', 'maxplaybackrate=48000');
       if (!kept.some(function(p) { return /^stereo=/i.test(p); })) kept.push('stereo=1');
       return 'a=fmtp:' + pt + ' ' + kept.join(';');
     });
   }
 
-  function startMeter(stream) {
+  function startPlayback(stream) {
     stopMeter();
+    remoteStream = stream;
+    btnPlay.classList.add('hidden');
+
+    p2pAudio.srcObject = stream;
+    p2pAudio.autoplay = true;
+    p2pAudio.muted = false;
+    p2pAudio.volume = 1;
+
+    if (pc && window.WebRTCLowLatency && WebRTCLowLatency.applyPlayout) {
+      WebRTCLowLatency.applyPlayout(pc, 20);
+    }
+
     try {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       var source = audioCtx.createMediaStreamSource(stream);
       analyserNode = audioCtx.createAnalyser();
       analyserNode.fftSize = 256;
-      source.connect(audioCtx.destination);
-      var data = new Uint8Array(analyserNode.frequencyBinCount);
-      meterInterval = setInterval(function() {
-        if (!analyserNode) return;
-        analyserNode.getByteFrequencyData(data);
-        var sum = 0;
-        for (var i = 0; i < data.length; i++) sum += data[i];
-        var avg = sum / data.length;
-        meterFill.style.width = Math.min(100, Math.round(avg / 170 * 100)) + '%';
-        meterLabel.textContent = avg > 3 ? '' : '等待音频流…';
-      }, 150);
-    } catch(e) { diagLog('meter err', e.message); }
+      source.connect(analyserNode);
+    } catch (e) {
+      diagLog('meter init err', e.message);
+    }
+
+    var data = new Uint8Array(analyserNode ? analyserNode.frequencyBinCount : 128);
+    meterInterval = setInterval(function() {
+      if (!analyserNode) return;
+      analyserNode.getByteFrequencyData(data);
+      var sum = 0;
+      for (var i = 0; i < data.length; i++) sum += data[i];
+      var avg = sum / data.length;
+      meterFill.style.width = Math.min(100, Math.round(avg / 170 * 100)) + '%';
+      meterLabel.textContent = avg > 3 ? '' : '等待音频流…';
+    }, 150);
+
+    tryPlayAudio();
   }
+
+  function tryPlayAudio() {
+    var playPromise = p2pAudio.play();
+    if (!playPromise || typeof playPromise.then !== 'function') {
+      setStatus('playing', '正在播放 🎵');
+      return;
+    }
+    playPromise.then(function() {
+      diagLog('AUDIO', 'element playing');
+      setStatus('playing', '正在播放 🎵');
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(function() {});
+      }
+    }).catch(function(err) {
+      diagLog('AUDIO-ERR', err && err.message);
+      setStatus('connected', '点击「播放」开始收听');
+      btnPlay.classList.remove('hidden');
+    });
+  }
+
+  window.resumePlayback = function() {
+    btnPlay.classList.add('hidden');
+    if (audioCtx && audioCtx.state === 'suspended') {
+      audioCtx.resume().catch(function() {});
+    }
+    tryPlayAudio();
+  };
 
   function stopMeter() {
     if (meterInterval) { clearInterval(meterInterval); meterInterval = null; }
     if (analyserNode) { try { analyserNode.disconnect(); } catch(_) {} analyserNode = null; }
     if (audioCtx && audioCtx.state !== 'closed') { audioCtx.close().catch(function(){}); audioCtx = null; }
+    if (p2pAudio) {
+      try { p2pAudio.pause(); } catch(_) {}
+      p2pAudio.srcObject = null;
+    }
+    remoteStream = null;
     meterFill.style.width = '0%';
     meterLabel.textContent = '等待音频流…';
+    btnPlay.classList.add('hidden');
   }
 
   // ── WebSocket ──
@@ -239,12 +307,16 @@
         break;
 
       case 'webrtc-ice':
-        if (msg.candidate && pc) {
+        if (!msg.candidate) break;
+        if (pc && pc.remoteDescription) {
           pc.addIceCandidate(new RTCIceCandidate(msg.candidate)).then(function() {
             diagLog('ICE+', 'added');
           }).catch(function(e) {
             diagLog('ICE-ERR', e.message);
           });
+        } else {
+          pendingCandidates.push(msg.candidate);
+          diagLog('ICE-Q', 'queued=' + pendingCandidates.length);
         }
         break;
 
@@ -269,53 +341,71 @@
     }
   }
 
+  function flushPendingCandidates() {
+    if (!pc) return;
+    var queued = pendingCandidates.slice();
+    pendingCandidates = [];
+    queued.forEach(function(c) {
+      pc.addIceCandidate(new RTCIceCandidate(c)).catch(function(e) {
+        diagLog('ICE-ERR', e.message);
+      });
+    });
+    if (queued.length) diagLog('ICE-FLUSH', String(queued.length));
+  }
+
   async function handleOffer(msg) {
     cleanupPC();
+    pendingCandidates = [];
+    useTurnPath = !!msg.useTURN;
 
-    var iceServers = [
-      { urls: 'stun:stun.qq.com:3478' },
-      { urls: 'stun:stun.aliyun.com:3478' },
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'turn:39.101.174.208:3478', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
-      { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' },
-    ];
+    var iceServers = useTurnPath ? ICE_SERVERS : STUN_ONLY;
+    var pcConfig = {
+      iceServers: iceServers,
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+      iceCandidatePoolSize: 0
+    };
+    if (useTurnPath) pcConfig.iceTransportPolicy = 'relay';
 
-    pc = new RTCPeerConnection({ iceServers: iceServers });
-    diagLog('PC', 'created');
+    pc = new RTCPeerConnection(pcConfig);
+    diagLog('PC', 'created turn=' + useTurnPath);
 
     pc.ontrack = function(e) {
       diagLog('TRACK', e.track.kind + ' label=' + e.track.label);
       if (e.track.kind !== 'audio') return;
-      var stream = e.streams[0];
-      if (!stream) return;
-
-      var audio = new Audio();
-      audio.srcObject = stream;
-      audio.autoplay = true;
-      audio.play().then(function() {
-        diagLog('AUDIO', 'playing');
-        setStatus('playing', '正在播放 🎵');
-        startMeter(stream);
-      }).catch(function() {
-        setStatus('connected', '点此页面开始播放');
-        document.body.addEventListener('click', function resume() {
-          audio.play().then(function() {
-            setStatus('playing', '正在播放 🎵');
-            startMeter(stream);
-          }).catch(function(){});
-        }, { once: true });
-      });
+      var stream = e.streams[0] || new MediaStream([e.track]);
+      startPlayback(stream);
     };
 
     pc.onicecandidate = function(e) {
       if (e.candidate && ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: 'webrtc-ice', candidate: e.candidate.toJSON() }));
+        ws.send(JSON.stringify({
+          type: 'webrtc-ice',
+          receiverId: receiverId,
+          candidate: e.candidate.toJSON()
+        }));
         diagLog('ICE-SEND', e.candidate.candidate.slice(0, 40));
       }
     };
 
     pc.oniceconnectionstatechange = function() {
       diagLog('ICE-STATE', pc.iceConnectionState);
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        setStatus('connected', '音频通道已连通');
+        if (remoteStream && p2pAudio.paused) tryPlayAudio();
+      }
+      if (pc.iceConnectionState === 'failed') {
+        if (!useTurnPath) {
+          diagLog('ICE', 'direct failed, request TURN retry');
+          useTurnPath = true;
+          if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'request-turn', receiverId: receiverId }));
+          }
+        } else {
+          setStatus('error', 'ICE 连接失败');
+          btnRejoin.classList.remove('hidden');
+        }
+      }
     };
 
     pc.onconnectionstatechange = function() {
@@ -327,40 +417,55 @@
       }
     };
 
-    // Handle SDP that might be a string or an object
     var sdpObj = msg.sdp;
     if (typeof sdpObj === 'string') {
-      // It was double-stringified, try to parse
       try { sdpObj = JSON.parse(sdpObj); } catch(_) {}
     }
-    var sdpStr = (typeof sdpObj === 'object' && sdpObj.sdp) ? sdpObj.sdp : sdpObj;
-    var sdpType = (typeof sdpObj === 'object' && sdpObj.type) ? sdpObj.type : 'offer';
-
-    diagLog('SDP', 'type=' + sdpType + ' len=' + (typeof sdpStr === 'string' ? sdpStr.length : 'NOT_STRING'));
-
-    if (typeof sdpStr !== 'string' || sdpStr.length < 10) {
+    if (!sdpObj || typeof sdpObj !== 'object') {
       throw new Error('SDP invalid: ' + JSON.stringify(sdpObj).slice(0, 80));
     }
 
-    var tunedSdp = tuneOpusSdp(sdpStr);
-    await pc.setRemoteDescription(new RTCSessionDescription({ type: sdpType, sdp: tunedSdp }));
+    var remoteDesc = (typeof RTCSessionDescription !== 'undefined')
+      ? new RTCSessionDescription(sdpObj)
+      : sdpObj;
+    if (remoteDesc.sdp) {
+      remoteDesc = {
+        type: remoteDesc.type || 'offer',
+        sdp: tuneOpusSdp(remoteDesc.sdp)
+      };
+    }
+
+    diagLog('SDP', 'type=' + remoteDesc.type + ' len=' + (remoteDesc.sdp ? remoteDesc.sdp.length : 0));
+
+    await pc.setRemoteDescription(remoteDesc);
+    flushPendingCandidates();
     diagLog('REMOTE-SET', 'ok');
 
-    var answer = await pc.createAnswer();
-    answer.sdp = tuneOpusSdp(answer.sdp);
-    await pc.setLocalDescription(answer);
+    if (window.WebRTCLowLatency && WebRTCLowLatency.createAnswer) {
+      await WebRTCLowLatency.createAnswer(pc);
+    } else {
+      var answer = await pc.createAnswer();
+      answer.sdp = tuneOpusSdp(answer.sdp);
+      await pc.setLocalDescription(answer);
+    }
     diagLog('ANSWER', 'created and set');
 
     try {
-      pc.getReceivers().forEach(function(r) {
-        if (r.track && r.track.kind === 'audio' && 'jitterBufferTarget' in r) {
-          r.jitterBufferTarget = 20;
-        }
-      });
+      if (pc.getReceivers) {
+        pc.getReceivers().forEach(function(r) {
+          if (r.track && r.track.kind === 'audio' && 'jitterBufferTarget' in r) {
+            r.jitterBufferTarget = 20;
+          }
+        });
+      }
     } catch(_) {}
 
     if (ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'webrtc-answer', sdp: pc.localDescription.toJSON() }));
+      ws.send(JSON.stringify({
+        type: 'webrtc-answer',
+        receiverId: receiverId,
+        sdp: pc.localDescription.toJSON()
+      }));
       diagLog('ANSWER-SENT', 'ok');
     }
     setStatus('connected', '通道建立中…');
@@ -368,8 +473,8 @@
 
   function cleanupPC() {
     if (pc) { try { pc.close(); } catch(_) {} pc = null; }
+    pendingCandidates = [];
     stopMeter();
-    joined = false;
   }
 
   function randomHex(len) {

@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>AudioStream Engine</title>
+<script src="/webrtc-low-latency.js"></script>
 </head>
 <body>
 <script>
@@ -11,6 +12,7 @@
 
   var ws = null;
   var pcs = {};
+  var pendingIce = {};
   var audioStream = null;
   var localAudioTrack = null;
   var pendingReceivers = [];
@@ -19,12 +21,15 @@
   var audioContext = null;
   var scriptNode = null;
   var destination = null;
-  var pcmRing = [];
-  var currentPacket = null;
-  var readIndex = 0;
   var sampleRate = 48000;
   var channels = 2;
-  var bufferSize = 4096;
+  var bufferSize = 512;
+  var lastChannelSamples = [];
+
+  var pcmRing = null;
+  var pcmWrite = 0;
+  var pcmRead = 0;
+  var pcmAvailable = 0;
 
   var ICE_SERVERS = [
     { urls: 'stun:stun.qq.com:3478' },
@@ -34,7 +39,13 @@
     { urls: 'turn:39.101.174.208:3478?transport=tcp', username: 'u1w2', credential: 'Mua04xOwvE8uBD4X' }
   ];
   var STUN_ONLY = ICE_SERVERS.filter(function(s) { return String(s.urls).indexOf('stun:') === 0; });
-  var OFFER_OPTIONS = { offerToReceiveAudio: false, offerToReceiveVideo: false, voiceActivityDetection: false };
+  var LL = window.WebRTCLowLatency || {};
+  var OFFER_OPTIONS = LL.OFFER_OPTIONS || {
+    offerToReceiveAudio: false,
+    offerToReceiveVideo: false,
+    voiceActivityDetection: false
+  };
+  var tuneOpusSdp = LL.tuneOpusSdp || function(sdp) { return sdp; };
 
   function log(msg) {
     console.log('[sender-engine] ' + msg);
@@ -47,6 +58,64 @@
     } catch (_) {}
   }
 
+  function ensurePcmRing() {
+    var cap = Math.max(8192, sampleRate * channels / 5);
+    if (!pcmRing || pcmRing.length < cap) {
+      pcmRing = new Int16Array(cap);
+      pcmWrite = 0;
+      pcmRead = 0;
+      pcmAvailable = 0;
+    }
+  }
+
+  function trimPcmRingIfNeeded(incomingLen) {
+    if (!pcmRing) return;
+    var maxKeep = Math.floor(sampleRate * channels * 0.12);
+    if (incomingLen + pcmAvailable <= pcmRing.length && pcmAvailable <= maxKeep) return;
+    if (pcmAvailable > maxKeep) {
+      var target = Math.floor(sampleRate * channels * 0.06);
+      var drop = pcmAvailable - target;
+      pcmRead = (pcmRead + drop) % pcmRing.length;
+      pcmAvailable -= drop;
+    }
+  }
+
+  function trimPcmAfterPush() {
+    if (!pcmRing) return;
+    var target = Math.floor(sampleRate * channels * 0.06);
+    var maxKeep = Math.floor(sampleRate * channels * 0.12);
+    if (pcmAvailable > maxKeep) {
+      var drop = pcmAvailable - target;
+      pcmRead = (pcmRead + drop) % pcmRing.length;
+      pcmAvailable -= drop;
+    }
+  }
+
+  function pushPcm(samples) {
+    ensurePcmRing();
+    var len = samples.length;
+    if (len === 0) return;
+    trimPcmRingIfNeeded(len);
+    if (len + pcmAvailable > pcmRing.length) {
+      pcmRead = pcmWrite;
+      pcmAvailable = 0;
+    }
+    for (var i = 0; i < len; i++) {
+      pcmRing[pcmWrite] = samples[i];
+      pcmWrite = (pcmWrite + 1) % pcmRing.length;
+    }
+    pcmAvailable += len;
+    trimPcmAfterPush();
+  }
+
+  function readPcmSample() {
+    if (pcmAvailable === 0) return 0;
+    var sample = pcmRing[pcmRead];
+    pcmRead = (pcmRead + 1) % pcmRing.length;
+    pcmAvailable--;
+    return sample / 32768;
+  }
+
   function decodeBase64ToInt16(b64) {
     var binary = atob(b64);
     var len = binary.length;
@@ -55,38 +124,41 @@
     return new Int16Array(bytes.buffer);
   }
 
-  function readPcmSample() {
-    while (true) {
-      if (!currentPacket || readIndex >= currentPacket.length) {
-        if (pcmRing.length === 0) return 0;
-        currentPacket = pcmRing.shift();
-        readIndex = 0;
-      }
-      if (currentPacket) {
-        return currentPacket[readIndex++] / 32768;
-      }
-      return 0;
-    }
-  }
-
   function setupNativeAudio(cfg) {
     if (audioReady) return Promise.resolve();
     sampleRate = cfg.sampleRate || 48000;
     channels = cfg.channels || 2;
+    ensurePcmRing();
     return new Promise(function(resolve, reject) {
       try {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: sampleRate });
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({
+          sampleRate: sampleRate,
+          latencyHint: 'interactive'
+        });
         destination = audioContext.createMediaStreamDestination();
         scriptNode = audioContext.createScriptProcessor(bufferSize, 0, channels);
+        var silentGain = audioContext.createGain();
+        silentGain.gain.value = 0;
+        lastChannelSamples = new Array(channels);
+        for (var c = 0; c < channels; c++) lastChannelSamples[c] = 0;
         scriptNode.onaudioprocess = function(e) {
           var frames = e.outputBuffer.length;
           for (var i = 0; i < frames; i++) {
             for (var ch = 0; ch < channels; ch++) {
-              e.outputBuffer.getChannelData(ch)[i] = readPcmSample();
+              var sample;
+              if (pcmAvailable > 0) {
+                sample = readPcmSample();
+                lastChannelSamples[ch] = sample;
+              } else {
+                sample = lastChannelSamples[ch] || 0;
+              }
+              e.outputBuffer.getChannelData(ch)[i] = sample;
             }
           }
         };
         scriptNode.connect(destination);
+        scriptNode.connect(silentGain);
+        silentGain.connect(audioContext.destination);
         audioStream = destination.stream;
         localAudioTrack = audioStream.getAudioTracks()[0] || null;
         var resume = audioContext.resume ? audioContext.resume() : Promise.resolve();
@@ -96,7 +168,7 @@
             reject(new Error('no audio track'));
             return;
           }
-          log('native audio track ready ' + sampleRate + 'Hz ' + channels + 'ch state=' + audioContext.state);
+          log('native audio track ready ' + sampleRate + 'Hz ' + channels + 'ch buf=' + bufferSize);
           try {
             if (window.chrome && chrome.webview) {
               chrome.webview.postMessage('track-ready');
@@ -129,8 +201,7 @@
     }
     if (msg.type === 'pcm' && msg.data) {
       if (!audioReady) return;
-      pcmRing.push(decodeBase64ToInt16(msg.data));
-      while (pcmRing.length > 16) pcmRing.shift();
+      pushPcm(decodeBase64ToInt16(msg.data));
     }
   }
 
@@ -144,18 +215,16 @@
     } catch (_) {}
   }
 
-  function tuneOpusSdp(sdp) {
-    if (!sdp) return sdp;
-    return sdp.replace(/a=fmtp:(\d+) ([^\r\n]+)/g, function(line, pt, params) {
-      if (sdp.indexOf('a=rtpmap:' + pt + ' opus/') === -1) return line;
-      var kept = params.split(';').filter(function(p) {
-        var k = p.split('=')[0].toLowerCase();
-        return ['minptime', 'ptime', 'maxplaybackrate'].indexOf(k) === -1;
-      });
-      kept.push('minptime=10', 'useinbandfec=1', 'maxplaybackrate=48000');
-      if (!kept.some(function(p) { return /^stereo=/i.test(p); })) kept.push('stereo=1');
-      return 'a=fmtp:' + pt + ' ' + kept.join(';');
-    });
+  function tuneSender(pc) {
+    var sender = pc.getSenders().find(function(s) { return s.track && s.track.kind === 'audio'; });
+    if (!sender || typeof sender.getParameters !== 'function') return;
+    try {
+      var params = sender.getParameters();
+      if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+      params.encodings[0].maxBitrate = 256000;
+      params.encodings[0].priority = 'high';
+      sender.setParameters(params).catch(function() {});
+    } catch (_) {}
   }
 
   function send(msg) {
@@ -168,6 +237,25 @@
       try { pc.close(); } catch (_) {}
       delete pcs[receiverId];
     }
+    delete pendingIce[receiverId];
+  }
+
+  function flushPendingIce(receiverId) {
+    var pc = pcs[receiverId];
+    var queued = pendingIce[receiverId];
+    if (!pc || !queued || !queued.length) return;
+    pendingIce[receiverId] = [];
+    queued.forEach(function(c) {
+      pc.addIceCandidate(new RTCIceCandidate(c)).catch(function(err) {
+        log('[' + receiverId + '] ice flush err ' + (err && err.message));
+      });
+    });
+    log('[' + receiverId + '] ice flushed ' + queued.length);
+  }
+
+  function queueIce(receiverId, candidate) {
+    if (!pendingIce[receiverId]) pendingIce[receiverId] = [];
+    pendingIce[receiverId].push(candidate);
   }
 
   async function createPeerConnection(receiverId, turn) {
@@ -177,9 +265,16 @@
       return;
     }
     closePc(receiverId);
-    var pc = new RTCPeerConnection({ iceServers: turn ? ICE_SERVERS : STUN_ONLY });
+    var pc = new RTCPeerConnection({
+      iceServers: turn ? ICE_SERVERS : STUN_ONLY,
+      iceTransportPolicy: turn ? 'relay' : 'all',
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+      iceCandidatePoolSize: 0
+    });
     pcs[receiverId] = pc;
     pc.addTrack(localAudioTrack, audioStream);
+    tuneSender(pc);
 
     pc.onicecandidate = function(e) {
       if (e.candidate) {
@@ -188,18 +283,29 @@
     };
     pc.onconnectionstatechange = function() {
       log('[' + receiverId + '] pc=' + pc.connectionState);
+      if (pc.connectionState === 'failed' && !turn) {
+        log('[' + receiverId + '] retry with TURN');
+        createPeerConnection(receiverId, true).catch(function(err) {
+          log('[' + receiverId + '] turn retry failed ' + (err && err.message));
+        });
+      }
     };
 
-    var offer = await pc.createOffer(OFFER_OPTIONS);
-    offer.sdp = tuneOpusSdp(offer.sdp);
-    await pc.setLocalDescription(offer);
+    if (LL.createOffer) {
+      await LL.createOffer(pc, OFFER_OPTIONS);
+    } else {
+      var offer = await pc.createOffer(OFFER_OPTIONS);
+      offer.sdp = tuneOpusSdp(offer.sdp);
+      await pc.setLocalDescription(offer);
+    }
+    tuneSender(pc);
     send({
       type: 'webrtc-offer',
       targetReceiverId: receiverId,
       useTURN: !!turn,
       sdp: pc.localDescription.toJSON()
     });
-    log('[' + receiverId + '] offer sent');
+    log('[' + receiverId + '] offer sent turn=' + !!turn);
   }
 
   function flushPendingReceivers() {
@@ -222,15 +328,28 @@
         if (typeof sdp === 'string') {
           try { sdp = JSON.parse(sdp); } catch (_) {}
         }
-        await pc.setRemoteDescription(sdp);
+        var remoteDesc = (typeof RTCSessionDescription !== 'undefined')
+          ? new RTCSessionDescription(sdp)
+          : sdp;
+        await pc.setRemoteDescription(remoteDesc);
+        flushPendingIce(receiverId);
+        tuneSender(pc);
         log('[' + receiverId + '] answer applied');
       }
       return;
     }
-    if (msg.type === 'webrtc-ice' && receiverId) {
+    if (msg.type === 'webrtc-ice' && receiverId && msg.candidate) {
       var pcIce = pcs[receiverId];
-      if (pcIce && msg.candidate) {
-        await pcIce.addIceCandidate(new RTCIceCandidate(msg.candidate));
+      if (!pcIce) return;
+      if (pcIce.remoteDescription && pcIce.remoteDescription.type) {
+        try {
+          await pcIce.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        } catch (err) {
+          log('[' + receiverId + '] ice err ' + (err && err.message));
+        }
+      } else {
+        queueIce(receiverId, msg.candidate);
+        log('[' + receiverId + '] ice queued');
       }
     }
   }
@@ -240,12 +359,25 @@
     var url = proto + '//' + location.host + '/?role=sender';
     log('connect ' + url);
     ws = new WebSocket(url);
-    ws.onopen = function() { log('ws open'); };
+    ws.onopen = function() {
+      log('ws open');
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'sender-ready' }));
+      }
+    };
     ws.onmessage = function(e) {
       var msg;
       try { msg = JSON.parse(e.data); } catch (_) { return; }
       if (msg.type === 'peer-ready' && msg.receiverId) {
         log('peer-ready ' + msg.receiverId);
+        var existing = pcs[msg.receiverId];
+        if (existing) {
+          var state = existing.connectionState;
+          if (state === 'connected') {
+            log('skip peer-ready existing pc=' + state);
+            return;
+          }
+        }
         if (!audioReady) {
           try {
             if (window.chrome && chrome.webview) {
@@ -260,6 +392,13 @@
       }
       if (msg.type === 'peer-left' && msg.receiverId) {
         closePc(msg.receiverId);
+        return;
+      }
+      if (msg.type === 'request-turn' && msg.receiverId) {
+        log('request-turn ' + msg.receiverId);
+        createPeerConnection(msg.receiverId, true).catch(function(err) {
+          log('request-turn failed ' + (err && err.message));
+        });
         return;
       }
       if (msg.receiverId || msg.type === 'webrtc-answer' || msg.type === 'webrtc-ice') {

@@ -18,6 +18,7 @@
       });
       kept.push(
         'minptime=10',
+        'ptime=10',
         'useinbandfec=1',
         'maxplaybackrate=48000'
       );

@@ -15,7 +15,7 @@ namespace {
 
 using Microsoft::WRL::ComPtr;
 
-constexpr REFERENCE_TIME kBufferDurationHundredNs = 100 * 10000;  // 100 ms
+constexpr REFERENCE_TIME kBufferDurationHundredNs = 30 * 10000;  // 30 ms
 
 void ConvertToInt16Interleaved(const BYTE* data, UINT32 numFrames, const WAVEFORMATEX* format,
                                std::vector<int16_t>& out) {
@@ -203,7 +203,7 @@ void WasapiLoopbackCapture::CaptureThreadMain() {
       }
     }
 
-    Sleep(5);
+    Sleep(1);
   }
 
   audioClient->Stop();

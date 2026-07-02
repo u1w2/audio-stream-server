@@ -373,6 +373,25 @@ static void HandleWebSocketMessage(LocalSignalingServerImpl* impl, struct mg_con
     HandleJoin(impl, c, json);
     return;
   }
+  if (type == "sender-ready" && isSender) {
+    std::vector<ReceiverConnection> receivers;
+    {
+      std::lock_guard<std::mutex> lock(impl->mutex);
+      receivers.reserve(impl->receivers.size());
+      for (const auto& entry : impl->receivers) {
+        receivers.push_back(entry.second);
+      }
+    }
+    for (const auto& receiver : receivers) {
+      std::ostringstream peerReady;
+      peerReady << "{\"type\":\"peer-ready\",\"receiverId\":\"" << JsonEscape(receiver.receiverId) << "\""
+                << ",\"nickname\":\"" << JsonEscape(receiver.nickname) << "\""
+                << ",\"connections\":1,\"netType\":\"wifi\",\"resync\":true}";
+      SendJson(c, peerReady.str());
+    }
+    Logger::Info("Sender ready; resent peer-ready for " + std::to_string(receivers.size()) + " receiver(s)");
+    return;
+  }
   if (type == "ping") {
     SendJson(c, "{\"type\":\"pong\"}");
     return;
