@@ -70,10 +70,10 @@
 
   function trimPcmRingIfNeeded(incomingLen) {
     if (!pcmRing) return;
-    var maxKeep = Math.floor(sampleRate * channels * 0.12);
+    var maxKeep = Math.floor(sampleRate * channels * 0.14);
     if (incomingLen + pcmAvailable <= pcmRing.length && pcmAvailable <= maxKeep) return;
     if (pcmAvailable > maxKeep) {
-      var target = Math.floor(sampleRate * channels * 0.06);
+      var target = Math.floor(sampleRate * channels * 0.08);
       var drop = pcmAvailable - target;
       pcmRead = (pcmRead + drop) % pcmRing.length;
       pcmAvailable -= drop;
@@ -82,8 +82,8 @@
 
   function trimPcmAfterPush() {
     if (!pcmRing) return;
-    var target = Math.floor(sampleRate * channels * 0.06);
-    var maxKeep = Math.floor(sampleRate * channels * 0.12);
+    var target = Math.floor(sampleRate * channels * 0.08);
+    var maxKeep = Math.floor(sampleRate * channels * 0.14);
     if (pcmAvailable > maxKeep) {
       var drop = pcmAvailable - target;
       pcmRead = (pcmRead + drop) % pcmRing.length;

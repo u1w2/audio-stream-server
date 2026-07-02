@@ -30,7 +30,7 @@ constexpr UINT kPushAudioConfigMsg = WM_APP + 46;
 constexpr UINT kFlushPcmNowMsg = WM_APP + 47;
 // ~10 ms stereo PCM @ 48 kHz
 constexpr size_t kMaxPcmBytesPerMessage = 1920;
-// Cap queued PCM to ~60 ms
+// Cap queued PCM to ~100 ms
 constexpr int kMaxQueueMs = 100;
 
 std::string Base64Encode(const uint8_t* data, size_t len) {
