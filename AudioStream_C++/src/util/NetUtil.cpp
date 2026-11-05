@@ -62,18 +62,18 @@ int ScoreAddress(const IpCandidate& candidate) {
 
 }  // namespace
 
-std::string PickBestLocalIPv4() {
+std::vector<NetworkInterfaceInfo> ListLocalIPv4Interfaces() {
   ULONG bufferSize = 0;
   if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
                            nullptr, nullptr, &bufferSize) != ERROR_BUFFER_OVERFLOW) {
-    return "127.0.0.1";
+    return {};
   }
 
   std::vector<unsigned char> buffer(bufferSize);
   auto* addresses = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
   if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
                            nullptr, addresses, &bufferSize) != NO_ERROR) {
-    return "127.0.0.1";
+    return {};
   }
 
   std::vector<IpCandidate> candidates;
@@ -110,7 +110,7 @@ std::string PickBestLocalIPv4() {
   }
 
   if (candidates.empty()) {
-    return "127.0.0.1";
+    return {};
   }
 
   for (auto& candidate : candidates) {
@@ -118,7 +118,56 @@ std::string PickBestLocalIPv4() {
   }
   std::sort(candidates.begin(), candidates.end(),
             [](const IpCandidate& a, const IpCandidate& b) { return a.priority < b.priority; });
-  return candidates.front().address;
+  std::vector<NetworkInterfaceInfo> interfaces;
+  interfaces.reserve(candidates.size());
+  for (const auto& candidate : candidates) {
+    interfaces.push_back({candidate.name, candidate.address});
+  }
+  return interfaces;
+}
+
+bool IsValidIPv4(const std::string& text) {
+  if (text.empty() || text.size() > 15) {
+    return false;
+  }
+  int parts = 0;
+  size_t i = 0;
+  while (i <= text.size()) {
+    size_t j = i;
+    int value = 0;
+    while (j < text.size() && text[j] >= '0' && text[j] <= '9') {
+      value = value * 10 + (text[j] - '0');
+      ++j;
+    }
+    const size_t len = j - i;
+    if (len == 0 || len > 3 || value > 255 || (len > 1 && text[i] == '0')) {
+      return false;
+    }
+    ++parts;
+    if (j == text.size()) {
+      break;
+    }
+    if (text[j] != '.') {
+      return false;
+    }
+    i = j + 1;
+  }
+  return parts == 4;
+}
+
+std::string PickBestLocalIPv4(const std::string& preferredIp) {
+  const auto interfaces = ListLocalIPv4Interfaces();
+  if (!preferredIp.empty()) {
+    for (const auto& iface : interfaces) {
+      if (iface.address == preferredIp) {
+        return preferredIp;
+      }
+    }
+  }
+  if (interfaces.empty()) {
+    return "127.0.0.1";
+  }
+  return interfaces.front().address;
 }
 
 }  // namespace audiostream

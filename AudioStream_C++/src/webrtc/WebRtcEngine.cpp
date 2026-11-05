@@ -25,13 +25,8 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr UINT kPcmFlushTimerId = 1;
-constexpr UINT kPcmFlushIntervalMs = 8;
 constexpr UINT kPushAudioConfigMsg = WM_APP + 46;
 constexpr UINT kFlushPcmNowMsg = WM_APP + 47;
-// ~10 ms stereo PCM @ 48 kHz
-constexpr size_t kMaxPcmBytesPerMessage = 1920;
-// Cap queued PCM to ~100 ms
-constexpr int kMaxQueueMs = 100;
 
 std::string Base64Encode(const uint8_t* data, size_t len) {
   static const char kTable[] =
@@ -72,6 +67,13 @@ struct WebRtcEngine::Impl {
   bool enginePageReady = false;
   int sampleRate = 48000;
   int channels = 2;
+  bool target200ms_ = false;
+  int pcmFlushIntervalMs_ = 8;
+  size_t maxPcmBytesPerMessage_ = 1920;
+  int maxQueueMs_ = 100;
+  // Flush as soon as this much PCM is queued. Flushes are driven mainly by the capture thread
+  // (ScheduleFlush); the WM_TIMER is only a backstop, since its real resolution is ~15.6 ms.
+  int minFlushMs_ = 10;
 
   void PushAudioConfigOnUiThread() {
     if (!webView || !captureStarted) {
@@ -103,13 +105,13 @@ struct WebRtcEngine::Impl {
   size_t MaxQueuedSamples() const {
     const int rate = sampleRate > 0 ? sampleRate : 48000;
     const int ch = channels > 0 ? channels : 2;
-    return static_cast<size_t>(rate) * static_cast<size_t>(ch) * kMaxQueueMs / 1000;
+    return static_cast<size_t>(rate) * static_cast<size_t>(ch) * maxQueueMs_ / 1000;
   }
 
   size_t MinFlushSamples() const {
     const int rate = sampleRate > 0 ? sampleRate : 48000;
     const int ch = channels > 0 ? channels : 2;
-    return static_cast<size_t>(rate) * static_cast<size_t>(ch) / 100;  // 10 ms
+    return static_cast<size_t>(rate) * static_cast<size_t>(ch) * minFlushMs_ / 1000;
   }
 
   void ScheduleFlush() {
@@ -158,7 +160,7 @@ struct WebRtcEngine::Impl {
       if (pcmQueue.empty()) {
         return;
       }
-      const size_t maxSamples = kMaxPcmBytesPerMessage / sizeof(int16_t);
+      const size_t maxSamples = maxPcmBytesPerMessage_ / sizeof(int16_t);
       const size_t take = std::min(pcmQueue.size(), maxSamples);
       chunk.assign(pcmQueue.begin(), pcmQueue.begin() + static_cast<std::ptrdiff_t>(take));
       pcmQueue.erase(pcmQueue.begin(), pcmQueue.begin() + static_cast<std::ptrdiff_t>(take));
@@ -203,7 +205,7 @@ struct WebRtcEngine::Impl {
           NotifyEvent("capture-started");
           RequestPushAudioConfig();
           if (hostWindow != nullptr) {
-            SetTimer(hostWindow, kPcmFlushTimerId, kPcmFlushIntervalMs, nullptr);
+            SetTimer(hostWindow, kPcmFlushTimerId, pcmFlushIntervalMs_, nullptr);
           }
         });
 
@@ -265,6 +267,21 @@ WebRtcEngine::~WebRtcEngine() {
 
 void WebRtcEngine::SetEventCallback(EventCallback callback) {
   impl_->eventCallback = std::move(callback);
+}
+
+void WebRtcEngine::SetLatencyMode(const bool target200ms) {
+  impl_->target200ms_ = target200ms;
+  if (target200ms) {
+    impl_->pcmFlushIntervalMs_ = 5;
+    impl_->maxPcmBytesPerMessage_ = 960;  // 5 ms stereo 16-bit @ 48 kHz
+    impl_->maxQueueMs_ = 55;
+    impl_->minFlushMs_ = 5;  // must match chunk size, or the queue idles at 5-10 ms
+  } else {
+    impl_->pcmFlushIntervalMs_ = 8;
+    impl_->maxPcmBytesPerMessage_ = 1920;
+    impl_->maxQueueMs_ = 100;
+    impl_->minFlushMs_ = 10;
+  }
 }
 
 bool WebRtcEngine::Start(HWND parentWindow, const std::string& engineUrl) {

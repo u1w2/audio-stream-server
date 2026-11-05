@@ -20,16 +20,100 @@
 
   var audioContext = null;
   var scriptNode = null;
+  var workletNode = null;
+  var useAudioWorklet = false;
+  var enableAudioWorklet = false;
   var destination = null;
   var sampleRate = 48000;
   var channels = 2;
   var bufferSize = 512;
+  var currentProfile = 'stable';
+  var profileReason = 'init';
+  var allowAutoLowProfile = false;
+  var latencyMode = 'stable';
   var lastChannelSamples = [];
 
   var pcmRing = null;
   var pcmWrite = 0;
   var pcmRead = 0;
   var pcmAvailable = 0;
+  var workletAvailableSamples = 0;
+  var workletUnderrunFrames = 0;
+  var workletDroppedSamples = 0;
+  var lastWorkletUnderrunFrames = 0;
+  var metricTimer = null;
+  var totalSamplesIn = 0;
+  var totalSamplesOut = 0;
+  var totalDroppedSamples = 0;
+  var underrunFrames = 0;
+  var windowUnderrunFrames = 0;
+  var lastAdaptiveCheckAt = 0;
+  var stableGoodWindows = 0;
+
+  var LATENCY_PROFILES = {
+    low: {
+      bufferSize: 256,
+      maxKeepSec: 0.085,
+      targetSec: 0.045,
+      maxQueueMs: 62,
+      // 每 5 秒窗口内的欠载时长（毫秒，已按 采样率×声道 换算）
+      underrunUpMs: 15,
+      underrunDownMs: 3
+    },
+    stable: {
+      bufferSize: 512,
+      maxKeepSec: 0.16,
+      targetSec: 0.10,
+      maxQueueMs: 110,
+      underrunUpMs: 30,
+      underrunDownMs: 3
+    }
+  };
+
+  function estimateSenderLatencyMs() {
+    var queueMs = currentQueueMs();
+    var frames = useAudioWorklet ? 128 : bufferSize;
+    var scriptBufMs = sampleRate > 0 ? Math.round((frames / sampleRate) * 1000) : 0;
+    var bridgeMs = latencyMode === '200ms' ? 32 : 55;
+    return queueMs + scriptBufMs + 20 + bridgeMs;
+  }
+
+  (function initProfileFromQuery() {
+    try {
+      var params = new URLSearchParams(location.search || '');
+      var profile = (params.get('profile') || '').toLowerCase();
+      var worklet = (params.get('worklet') || '').toLowerCase();
+      var autoLow = (params.get('autoLow') || '').toLowerCase();
+      var mode = (params.get('latencyMode') || '').toLowerCase();
+      enableAudioWorklet = worklet === '1' || worklet === 'true' || worklet === 'on';
+      if (autoLow === '0' || autoLow === 'false' || autoLow === 'off') {
+        allowAutoLowProfile = false;
+      } else if (autoLow === '1' || autoLow === 'true' || autoLow === 'on') {
+        allowAutoLowProfile = true;
+      }
+      if (mode === '200ms' || mode === 'low200') {
+        latencyMode = '200ms';
+        allowAutoLowProfile = false;
+        applyProfile('low', 'mode-200ms');
+        return;
+      }
+      if (mode === 'stable') {
+        latencyMode = 'stable';
+        allowAutoLowProfile = false;
+        applyProfile('stable', 'mode-stable');
+        return;
+      }
+      if (profile === 'low' || profile === 'stable') {
+        applyProfile(profile, 'query');
+      } else {
+        applyProfile('stable', 'default');
+      }
+    } catch (_) {
+      applyProfile('stable', 'fallback');
+      enableAudioWorklet = false;
+      allowAutoLowProfile = false;
+    }
+  })();
 
   var ICE_SERVERS = [
     { urls: 'stun:stun.qq.com:3478' },
@@ -68,26 +152,64 @@
     }
   }
 
+  function getProfile() {
+    return LATENCY_PROFILES[currentProfile] || LATENCY_PROFILES.stable;
+  }
+
+  function applyProfile(name, reason) {
+    if (!LATENCY_PROFILES[name]) return;
+    if (currentProfile === name && profileReason === reason) return;
+    currentProfile = name;
+    profileReason = reason || 'runtime';
+    var profile = getProfile();
+    if (!audioReady) {
+      bufferSize = profile.bufferSize;
+    }
+    if (useAudioWorklet && workletNode && workletNode.port) {
+      workletNode.port.postMessage({
+        type: 'config',
+        maxKeepSec: profile.maxKeepSec,
+        targetSec: profile.targetSec
+      });
+    }
+    log('latency profile=' + currentProfile + ' reason=' + profileReason + ' buffer=' + bufferSize);
+  }
+
+  function currentQueueMs() {
+    if (useAudioWorklet) {
+      var workletDenom = sampleRate * channels;
+      if (!workletDenom) return 0;
+      return Math.round((workletAvailableSamples * 1000) / workletDenom);
+    }
+    var denom = sampleRate * channels;
+    if (!denom) return 0;
+    return Math.round((pcmAvailable * 1000) / denom);
+  }
+
   function trimPcmRingIfNeeded(incomingLen) {
     if (!pcmRing) return;
-    var maxKeep = Math.floor(sampleRate * channels * 0.14);
+    var profile = getProfile();
+    var maxKeep = Math.floor(sampleRate * channels * profile.maxKeepSec);
     if (incomingLen + pcmAvailable <= pcmRing.length && pcmAvailable <= maxKeep) return;
     if (pcmAvailable > maxKeep) {
-      var target = Math.floor(sampleRate * channels * 0.08);
+      var target = Math.floor(sampleRate * channels * profile.targetSec);
       var drop = pcmAvailable - target;
       pcmRead = (pcmRead + drop) % pcmRing.length;
       pcmAvailable -= drop;
+      totalDroppedSamples += Math.max(0, drop);
     }
   }
 
   function trimPcmAfterPush() {
     if (!pcmRing) return;
-    var target = Math.floor(sampleRate * channels * 0.08);
-    var maxKeep = Math.floor(sampleRate * channels * 0.14);
+    var profile = getProfile();
+    var target = Math.floor(sampleRate * channels * profile.targetSec);
+    var maxKeep = Math.floor(sampleRate * channels * profile.maxKeepSec);
     if (pcmAvailable > maxKeep) {
       var drop = pcmAvailable - target;
       pcmRead = (pcmRead + drop) % pcmRing.length;
       pcmAvailable -= drop;
+      totalDroppedSamples += Math.max(0, drop);
     }
   }
 
@@ -105,6 +227,7 @@
       pcmWrite = (pcmWrite + 1) % pcmRing.length;
     }
     pcmAvailable += len;
+    totalSamplesIn += len;
     trimPcmAfterPush();
   }
 
@@ -113,6 +236,7 @@
     var sample = pcmRing[pcmRead];
     pcmRead = (pcmRead + 1) % pcmRing.length;
     pcmAvailable--;
+    totalSamplesOut += 1;
     return sample / 32768;
   }
 
@@ -124,6 +248,145 @@
     return new Int16Array(bytes.buffer);
   }
 
+  function buildPcmWorkletSource() {
+    return [
+      'class PcmPlayerProcessor extends AudioWorkletProcessor {',
+      '  constructor(options) {',
+      '    super();',
+      '    const opt = (options && options.processorOptions) || {};',
+      '    this.channels = opt.channels || 2;',
+      '    this.sampleRateHz = opt.sampleRate || 48000;',
+      '    this.maxKeepSec = opt.maxKeepSec || 0.14;',
+      '    this.targetSec = opt.targetSec || 0.08;',
+      '    this.capacity = Math.max(8192, Math.floor(this.sampleRateHz * this.channels * 0.3));',
+      '    this.ring = new Int16Array(this.capacity);',
+      '    this.writePos = 0;',
+      '    this.readPos = 0;',
+      '    this.available = 0;',
+      '    this.lastSamples = new Array(this.channels).fill(0);',
+      '    this.totalUnderrun = 0;',
+      '    this.totalDropped = 0;',
+      '    this.totalRead = 0;',
+      '    this.lastMetricAt = 0;',
+      '    this.port.onmessage = (event) => {',
+      '      const msg = event.data || {};',
+      '      if (msg.type === "config") {',
+      '        this.maxKeepSec = msg.maxKeepSec || this.maxKeepSec;',
+      '        this.targetSec = msg.targetSec || this.targetSec;',
+      '        return;',
+      '      }',
+      '      if (msg.type !== "pcm" || !msg.samples) return;',
+      '      this.push(msg.samples);',
+      '    };',
+      '  }',
+      '  push(samples) {',
+      '    const len = samples.length;',
+      '    if (!len) return;',
+      '    const maxKeep = Math.floor(this.sampleRateHz * this.channels * this.maxKeepSec);',
+      '    const target = Math.floor(this.sampleRateHz * this.channels * this.targetSec);',
+      '    if (this.available > maxKeep) {',
+      '      const drop = this.available - target;',
+      '      this.readPos = (this.readPos + drop) % this.capacity;',
+      '      this.available -= drop;',
+      '      this.totalDropped += drop;',
+      '    }',
+      '    if (len + this.available > this.capacity) {',
+      '      const overflow = len + this.available - this.capacity;',
+      '      this.readPos = (this.readPos + overflow) % this.capacity;',
+      '      this.available -= overflow;',
+      '      this.totalDropped += overflow;',
+      '    }',
+      '    for (let i = 0; i < len; i += 1) {',
+      '      this.ring[this.writePos] = samples[i];',
+      '      this.writePos = (this.writePos + 1) % this.capacity;',
+      '    }',
+      '    this.available += len;',
+      '  }',
+      '  read() {',
+      '    if (this.available === 0) return null;',
+      '    const value = this.ring[this.readPos] / 32768;',
+      '    this.readPos = (this.readPos + 1) % this.capacity;',
+      '    this.available -= 1;',
+      '    this.totalRead += 1;',
+      '    return value;',
+      '  }',
+      '  process(inputs, outputs) {',
+      '    const output = outputs[0];',
+      '    if (!output || output.length === 0) return true;',
+      '    const frames = output[0].length;',
+      '    for (let i = 0; i < frames; i += 1) {',
+      '      for (let ch = 0; ch < output.length; ch += 1) {',
+      '        let sample = this.read();',
+      '        if (sample === null) {',
+      '          sample = this.lastSamples[ch] || 0;',
+      '          this.totalUnderrun += 1;',
+      '        } else {',
+      '          this.lastSamples[ch] = sample;',
+      '        }',
+      '        output[ch][i] = sample;',
+      '      }',
+      '    }',
+      '    if (currentTime - this.lastMetricAt >= 1) {',
+      '      this.lastMetricAt = currentTime;',
+      '      this.port.postMessage({',
+      '        type: "metric",',
+      '        availableSamples: this.available,',
+      '        underrunFrames: this.totalUnderrun,',
+      '        readSamples: this.totalRead,',
+      '        droppedSamples: this.totalDropped',
+      '      });',
+      '    }',
+      '    return true;',
+      '  }',
+      '}',
+      'registerProcessor("pcm-player-processor", PcmPlayerProcessor);'
+    ].join('\n');
+  }
+
+  async function setupAudioWorkletPath(profile) {
+    if (!audioContext || !audioContext.audioWorklet) return false;
+    var source = buildPcmWorkletSource();
+    var blob = new Blob([source], { type: 'application/javascript' });
+    var moduleUrl = URL.createObjectURL(blob);
+    try {
+      await audioContext.audioWorklet.addModule(moduleUrl);
+      workletNode = new AudioWorkletNode(audioContext, 'pcm-player-processor', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [channels],
+        processorOptions: {
+          channels: channels,
+          sampleRate: sampleRate,
+          maxKeepSec: profile.maxKeepSec,
+          targetSec: profile.targetSec
+        }
+      });
+      workletNode.port.onmessage = function(event) {
+        var msg = event.data || {};
+        if (msg.type !== 'metric') return;
+        workletAvailableSamples = msg.availableSamples || 0;
+        workletUnderrunFrames = msg.underrunFrames || 0;
+        workletDroppedSamples = msg.droppedSamples || 0;
+        totalSamplesOut = msg.readSamples || 0;
+      };
+      var silentGain = audioContext.createGain();
+      silentGain.gain.value = 0;
+      workletNode.connect(destination);
+      workletNode.connect(silentGain);
+      silentGain.connect(audioContext.destination);
+      useAudioWorklet = true;
+      log('audio path=worklet');
+      return true;
+    } catch (err) {
+      log('audio worklet unavailable: ' + (err && err.message ? err.message : err));
+      useAudioWorklet = false;
+      workletNode = null;
+      return false;
+    } finally {
+      URL.revokeObjectURL(moduleUrl);
+    }
+  }
+
   function setupNativeAudio(cfg) {
     if (audioReady) return Promise.resolve();
     sampleRate = cfg.sampleRate || 48000;
@@ -131,38 +394,48 @@
     ensurePcmRing();
     return new Promise(function(resolve, reject) {
       try {
+        var profile = getProfile();
         audioContext = new (window.AudioContext || window.webkitAudioContext)({
           sampleRate: sampleRate,
           latencyHint: 'interactive'
         });
         destination = audioContext.createMediaStreamDestination();
-        scriptNode = audioContext.createScriptProcessor(bufferSize, 0, channels);
-        var silentGain = audioContext.createGain();
-        silentGain.gain.value = 0;
-        lastChannelSamples = new Array(channels);
-        for (var c = 0; c < channels; c++) lastChannelSamples[c] = 0;
-        scriptNode.onaudioprocess = function(e) {
-          var frames = e.outputBuffer.length;
-          for (var i = 0; i < frames; i++) {
-            for (var ch = 0; ch < channels; ch++) {
-              var sample;
-              if (pcmAvailable > 0) {
-                sample = readPcmSample();
-                lastChannelSamples[ch] = sample;
-              } else {
-                sample = lastChannelSamples[ch] || 0;
+        var workletPromise = enableAudioWorklet ? setupAudioWorkletPath(profile) : Promise.resolve(false);
+        workletPromise.then(function(ok) {
+          if (!ok) {
+            scriptNode = audioContext.createScriptProcessor(bufferSize, 0, channels);
+            var silentGain = audioContext.createGain();
+            silentGain.gain.value = 0;
+            lastChannelSamples = new Array(channels);
+            for (var c = 0; c < channels; c++) lastChannelSamples[c] = 0;
+            scriptNode.onaudioprocess = function(e) {
+              var frames = e.outputBuffer.length;
+              for (var i = 0; i < frames; i++) {
+                for (var ch = 0; ch < channels; ch++) {
+                  var sample;
+                  if (pcmAvailable > 0) {
+                    sample = readPcmSample();
+                    lastChannelSamples[ch] = sample;
+                  } else {
+                    sample = lastChannelSamples[ch] || 0;
+                    underrunFrames += 1;
+                    windowUnderrunFrames += 1;
+                  }
+                  e.outputBuffer.getChannelData(ch)[i] = sample;
+                }
               }
-              e.outputBuffer.getChannelData(ch)[i] = sample;
-            }
+            };
+            scriptNode.connect(destination);
+            scriptNode.connect(silentGain);
+            silentGain.connect(audioContext.destination);
+            log('audio path=scriptprocessor');
           }
-        };
-        scriptNode.connect(destination);
-        scriptNode.connect(silentGain);
-        silentGain.connect(audioContext.destination);
-        audioStream = destination.stream;
-        localAudioTrack = audioStream.getAudioTracks()[0] || null;
-        var resume = audioContext.resume ? audioContext.resume() : Promise.resolve();
-        resume.then(function() {
+
+          audioStream = destination.stream;
+          localAudioTrack = audioStream.getAudioTracks()[0] || null;
+          var resume = audioContext.resume ? audioContext.resume() : Promise.resolve();
+          return resume;
+        }).then(function() {
           audioReady = !!localAudioTrack;
           if (!audioReady) {
             reject(new Error('no audio track'));
@@ -175,6 +448,7 @@
             }
           } catch (_) {}
           flushPendingReceivers();
+          startMetricLoop();
           resolve();
         }).catch(reject);
       } catch (err) {
@@ -196,12 +470,26 @@
     if (!msg || !msg.type) return;
 
     if (msg.type === 'audio-config') {
+      var profileCfg = getProfile();
+      if (useAudioWorklet && workletNode && workletNode.port) {
+        workletNode.port.postMessage({
+          type: 'config',
+          maxKeepSec: profileCfg.maxKeepSec,
+          targetSec: profileCfg.targetSec
+        });
+      }
       setupNativeAudio(msg).catch(function() {});
       return;
     }
     if (msg.type === 'pcm' && msg.data) {
       if (!audioReady) return;
-      pushPcm(decodeBase64ToInt16(msg.data));
+      var samples = decodeBase64ToInt16(msg.data);
+      if (useAudioWorklet && workletNode && workletNode.port) {
+        totalSamplesIn += samples.length;
+        workletNode.port.postMessage({ type: 'pcm', samples: samples }, [samples.buffer]);
+      } else {
+        pushPcm(samples);
+      }
     }
   }
 
@@ -225,6 +513,83 @@
       params.encodings[0].priority = 'high';
       sender.setParameters(params).catch(function() {});
     } catch (_) {}
+  }
+
+  function estimateMaxQueueMsForProfile() {
+    return getProfile().maxQueueMs;
+  }
+
+  function maybeAdaptProfile() {
+    var now = Date.now();
+    if (now - lastAdaptiveCheckAt < 5000) return;
+    lastAdaptiveCheckAt = now;
+    var profile = getProfile();
+    var queueMs = currentQueueMs();
+    var underruns = windowUnderrunFrames;
+    windowUnderrunFrames = 0;
+
+    if (useAudioWorklet) {
+      underruns = Math.max(0, workletUnderrunFrames - lastWorkletUnderrunFrames);
+      lastWorkletUnderrunFrames = workletUnderrunFrames;
+      totalDroppedSamples = workletDroppedSamples;
+    }
+    // underruns 以「采样×声道」计数，换算成毫秒再与阈值比较
+    var denom = sampleRate * channels;
+    var underrunMs = denom > 0 ? (underruns * 1000) / denom : 0;
+
+    if (currentProfile === 'low' && (underrunMs > profile.underrunUpMs || queueMs > profile.maxQueueMs + 12)) {
+      stableGoodWindows = 0;
+      applyProfile('stable', latencyMode === '200ms' ? '200ms-guard' : 'underrun-guard');
+      return;
+    }
+    if (currentProfile === 'stable' && allowAutoLowProfile) {
+      if (underrunMs < profile.underrunDownMs && queueMs < 48 && Object.keys(pcs).length > 0) {
+        stableGoodWindows += 1;
+      } else {
+        stableGoodWindows = 0;
+      }
+      if (stableGoodWindows >= 4) {
+        stableGoodWindows = 0;
+        applyProfile('low', 'latency-recover');
+      }
+      return;
+    }
+    if (latencyMode === '200ms' && currentProfile === 'stable') {
+      if (underrunMs < LATENCY_PROFILES.low.underrunDownMs && queueMs < 52 && Object.keys(pcs).length > 0) {
+        stableGoodWindows += 1;
+      } else {
+        stableGoodWindows = 0;
+      }
+      if (stableGoodWindows >= 6) {
+        stableGoodWindows = 0;
+        applyProfile('low', '200ms-recover');
+      }
+    }
+  }
+
+  function startMetricLoop() {
+    if (metricTimer) return;
+    metricTimer = setInterval(function() {
+      var connectedCount = Object.values(pcs).filter(function(pc) {
+        return pc && pc.connectionState === 'connected';
+      }).length;
+      var queueMs = currentQueueMs();
+      var estMs = estimateSenderLatencyMs();
+      log(
+        'metric mode=' + latencyMode +
+        ' profile=' + currentProfile +
+        ' queueMs=' + queueMs +
+        ' estMs=' + estMs +
+        ' maxQueueMs=' + estimateMaxQueueMsForProfile() +
+        ' in=' + totalSamplesIn +
+        ' out=' + totalSamplesOut +
+        ' dropped=' + totalDroppedSamples +
+        ' underrun=' + (useAudioWorklet ? workletUnderrunFrames : underrunFrames) +
+        ' path=' + (useAudioWorklet ? 'worklet' : 'scriptprocessor') +
+        ' peers=' + connectedCount
+      );
+      maybeAdaptProfile();
+    }, 1000);
   }
 
   function send(msg) {

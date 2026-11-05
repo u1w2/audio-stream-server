@@ -1,6 +1,7 @@
 #include "config/Config.h"
 
 #include "protocol/Protocol.h"
+#include "util/NetUtil.h"
 #include "util/Paths.h"
 
 #include <fstream>
@@ -15,6 +16,17 @@ std::string ModeToJsonValue(const Mode mode) {
 
 Mode ModeFromJsonValue(const std::string& value) {
   return value == "cloud" ? Mode::kCloud : Mode::kLan;
+}
+
+std::string LatencyModeToJsonValue(const LatencyMode mode) {
+  return mode == LatencyMode::kTarget200ms ? "200ms" : "stable";
+}
+
+LatencyMode LatencyModeFromJsonValue(const std::string& value) {
+  if (value == "200ms" || value == "low200" || value == "target200ms") {
+    return LatencyMode::kTarget200ms;
+  }
+  return LatencyMode::kStable;
 }
 
 std::string ExtractJsonString(const std::string& json, const std::string& key) {
@@ -85,7 +97,9 @@ bool ExtractJsonBool(const std::string& json, const std::string& key, const bool
 AppConfig DefaultConfig() {
   AppConfig config{};
   config.defaultMode = Mode::kLan;
+  config.latencyMode = LatencyMode::kStable;
   config.cloudServer = protocol::kDefaultCloudServer;
+  config.lanIp = "";
   config.localPort = protocol::kDefaultLocalPort;
   config.maxConnections = 5;
   config.autoLaunch = false;
@@ -100,7 +114,9 @@ std::string SerializeConfig(const AppConfig& config) {
   std::ostringstream oss;
   oss << "{\n"
       << "  \"defaultMode\": \"" << ModeToJsonValue(config.defaultMode) << "\",\n"
+      << "  \"latencyMode\": \"" << LatencyModeToJsonValue(config.latencyMode) << "\",\n"
       << "  \"cloudServer\": \"" << config.cloudServer << "\",\n"
+      << "  \"lanIp\": \"" << config.lanIp << "\",\n"
       << "  \"localPort\": " << config.localPort << ",\n"
       << "  \"maxConnections\": " << config.maxConnections << ",\n"
       << "  \"autoLaunch\": " << (config.autoLaunch ? "true" : "false") << ",\n"
@@ -118,9 +134,17 @@ AppConfig DeserializeConfig(const std::string& json) {
   if (!mode.empty()) {
     config.defaultMode = ModeFromJsonValue(mode);
   }
+  const std::string latencyMode = ExtractJsonString(json, "latencyMode");
+  if (!latencyMode.empty()) {
+    config.latencyMode = LatencyModeFromJsonValue(latencyMode);
+  }
   const std::string cloudServer = ExtractJsonString(json, "cloudServer");
   if (!cloudServer.empty()) {
     config.cloudServer = cloudServer;
+  }
+  config.lanIp = ExtractJsonString(json, "lanIp");
+  if (!config.lanIp.empty() && !IsValidIPv4(config.lanIp)) {
+    config.lanIp.clear();  // never round-trip garbage into the JSON file
   }
   config.localPort = ExtractJsonInt(json, "localPort", config.localPort);
   config.maxConnections = ExtractJsonInt(json, "maxConnections", config.maxConnections);

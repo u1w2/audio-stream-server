@@ -9,7 +9,7 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"AudioStreamSenderMainWindow";
 constexpr int kDefaultWidth = 560;
-constexpr int kDefaultHeight = 680;
+constexpr int kDefaultHeight = 760;
 constexpr int kQrDisplaySize = 200;
 constexpr int kQrTop = 16;
 
@@ -28,6 +28,13 @@ MainWindow::MainWindow()
       audioStatusText_(nullptr),
       labelReceivers_(nullptr),
       receiverList_(nullptr),
+      labelLanIp_(nullptr),
+      comboLanIp_(nullptr),
+      buttonLanApply_(nullptr),
+      labelLatencyMode_(nullptr),
+      comboLatencyMode_(nullptr),
+      buttonLatencyApply_(nullptr),
+      latencyEstimateText_(nullptr),
       qrBitmap_(nullptr),
       messageHandler_(nullptr) {}
 
@@ -110,6 +117,12 @@ void MainWindow::SetAudioStatusText(const std::wstring& text) {
   }
 }
 
+void MainWindow::SetLatencyEstimateText(const std::wstring& text) {
+  if (latencyEstimateText_ != nullptr) {
+    SetWindowTextW(latencyEstimateText_, text.c_str());
+  }
+}
+
 void MainWindow::SetReceiverList(const std::vector<std::wstring>& receivers) {
   if (receiverList_ == nullptr) {
     return;
@@ -123,6 +136,66 @@ void MainWindow::SetReceiverList(const std::vector<std::wstring>& receivers) {
   for (const auto& item : receivers) {
     SendMessageW(receiverList_, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
   }
+}
+
+void MainWindow::SetLanInterfaceList(const std::vector<std::wstring>& interfaces,
+                                     const std::wstring& selectedIp) {
+  if (comboLanIp_ == nullptr) {
+    return;
+  }
+  SendMessageW(comboLanIp_, CB_RESETCONTENT, 0, 0);
+  int selectedIndex = -1;
+  const std::wstring needle = L"[" + selectedIp + L"]";
+  for (size_t i = 0; i < interfaces.size(); ++i) {
+    const auto& item = interfaces[i];
+    const LRESULT idx = SendMessageW(comboLanIp_, CB_ADDSTRING, 0,
+                                     reinterpret_cast<LPARAM>(item.c_str()));
+    // Exact "[ip]" suffix match: "192.168.1.1" must not match "[192.168.1.10]".
+    if (selectedIndex < 0 && !selectedIp.empty() && item.size() >= needle.size() &&
+        item.compare(item.size() - needle.size(), needle.size(), needle) == 0) {
+      selectedIndex = static_cast<int>(idx);
+    }
+  }
+  if (selectedIndex < 0 && !interfaces.empty()) {
+    selectedIndex = 0;
+  }
+  if (selectedIndex >= 0) {
+    SendMessageW(comboLanIp_, CB_SETCURSEL, static_cast<WPARAM>(selectedIndex), 0);
+  }
+}
+
+std::wstring MainWindow::GetSelectedLanIp() const {
+  if (comboLanIp_ == nullptr) {
+    return L"";
+  }
+  const LRESULT idx = SendMessageW(comboLanIp_, CB_GETCURSEL, 0, 0);
+  if (idx == CB_ERR) {
+    return L"";
+  }
+  wchar_t text[256] = {};
+  SendMessageW(comboLanIp_, CB_GETLBTEXT, idx, reinterpret_cast<LPARAM>(text));
+  const std::wstring selected(text);
+  const size_t left = selected.find(L'[');
+  const size_t right = selected.find(L']');
+  if (left != std::wstring::npos && right != std::wstring::npos && right > left + 1) {
+    return selected.substr(left + 1, right - left - 1);
+  }
+  return selected;
+}
+
+void MainWindow::SetLatencyModeSelection(const bool target200ms) {
+  if (comboLatencyMode_ == nullptr) {
+    return;
+  }
+  SendMessageW(comboLatencyMode_, CB_SETCURSEL, target200ms ? 1 : 0, 0);
+}
+
+bool MainWindow::IsLatencyMode200msSelected() const {
+  if (comboLatencyMode_ == nullptr) {
+    return false;
+  }
+  const LRESULT idx = SendMessageW(comboLatencyMode_, CB_GETCURSEL, 0, 0);
+  return idx == 1;
 }
 
 void MainWindow::SetQrBitmap(const HBITMAP bitmap) {
@@ -232,6 +305,43 @@ void MainWindow::OnCreate() {
       WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 24, contentTop + 280,
       kDefaultWidth - 48, 120, hwnd_, nullptr, instance_, nullptr);
   SetReceiverList({});
+
+  labelLanIp_ = CreateWindowExW(
+      0, L"STATIC", i18n::Tr(L"label.lan_ip").c_str(), WS_CHILD | WS_VISIBLE, 24,
+      contentTop + 416, 120, 24, hwnd_, nullptr, instance_, nullptr);
+
+  comboLanIp_ = CreateWindowExW(
+      0, L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 24,
+      contentTop + 442, kDefaultWidth - 180, 320, hwnd_,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlLanCombo)), instance_, nullptr);
+
+  buttonLanApply_ = CreateWindowExW(
+      0, L"BUTTON", i18n::Tr(L"button.apply_lan_ip").c_str(), WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+      kDefaultWidth - 144, contentTop + 442, 120, 28, hwnd_,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlLanApplyButton)), instance_, nullptr);
+
+  labelLatencyMode_ = CreateWindowExW(
+      0, L"STATIC", i18n::Tr(L"label.latency_mode").c_str(), WS_CHILD | WS_VISIBLE, 24,
+      contentTop + 480, 160, 24, hwnd_, nullptr, instance_, nullptr);
+
+  comboLatencyMode_ = CreateWindowExW(
+      0, L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, 24,
+      contentTop + 506, kDefaultWidth - 180, 200, hwnd_,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlLatencyCombo)), instance_, nullptr);
+  SendMessageW(comboLatencyMode_, CB_ADDSTRING, 0,
+               reinterpret_cast<LPARAM>(i18n::Tr(L"latency.mode.stable").c_str()));
+  SendMessageW(comboLatencyMode_, CB_ADDSTRING, 0,
+               reinterpret_cast<LPARAM>(i18n::Tr(L"latency.mode.200ms").c_str()));
+  SendMessageW(comboLatencyMode_, CB_SETCURSEL, 0, 0);
+
+  buttonLatencyApply_ = CreateWindowExW(
+      0, L"BUTTON", i18n::Tr(L"button.apply_latency_mode").c_str(),
+      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, kDefaultWidth - 144, contentTop + 506, 120, 28, hwnd_,
+      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlLatencyApplyButton)), instance_, nullptr);
+
+  latencyEstimateText_ = CreateWindowExW(
+      0, L"STATIC", L"", WS_CHILD | WS_VISIBLE, 24, contentTop + 542, kDefaultWidth - 48, 24, hwnd_,
+      nullptr, instance_, nullptr);
 }
 
 void MainWindow::OnDestroy() {
@@ -279,6 +389,29 @@ void MainWindow::OnSize(const int width, const int height) {
   }
   if (receiverList_ != nullptr) {
     SetWindowPos(receiverList_, nullptr, 24, contentTop + 280, contentWidth, 120, SWP_NOZORDER);
+  }
+  if (labelLanIp_ != nullptr) {
+    SetWindowPos(labelLanIp_, nullptr, 24, contentTop + 416, 120, 24, SWP_NOZORDER);
+  }
+  if (comboLanIp_ != nullptr) {
+    SetWindowPos(comboLanIp_, nullptr, 24, contentTop + 442, contentWidth - 132, 320, SWP_NOZORDER);
+  }
+  if (buttonLanApply_ != nullptr) {
+    SetWindowPos(buttonLanApply_, nullptr, width - 120, contentTop + 442, 96, 28, SWP_NOZORDER);
+  }
+  if (labelLatencyMode_ != nullptr) {
+    SetWindowPos(labelLatencyMode_, nullptr, 24, contentTop + 480, 160, 24, SWP_NOZORDER);
+  }
+  if (comboLatencyMode_ != nullptr) {
+    SetWindowPos(comboLatencyMode_, nullptr, 24, contentTop + 506, contentWidth - 132, 200,
+                 SWP_NOZORDER);
+  }
+  if (buttonLatencyApply_ != nullptr) {
+    SetWindowPos(buttonLatencyApply_, nullptr, width - 120, contentTop + 506, 96, 28, SWP_NOZORDER);
+  }
+  if (latencyEstimateText_ != nullptr) {
+    SetWindowPos(latencyEstimateText_, nullptr, 24, contentTop + 542, contentWidth, 24,
+                 SWP_NOZORDER);
   }
 }
 

@@ -4,7 +4,7 @@
  */
 (function (global) {
   /** 接收端抖动缓冲目标（毫秒）；过小易卡顿，0 仅建议在局域网试 */
-  const JITTER_BUFFER_TARGET_MS = 20;
+  const JITTER_BUFFER_TARGET_MS = 16;
 
   const OFFER_OPTIONS = { voiceActivityDetection: false };
 

@@ -2,6 +2,9 @@
 
 #include <functional>
 #include <string>
+#include <vector>
+
+#include "util/NetUtil.h"
 
 namespace audiostream {
 
@@ -27,11 +30,16 @@ class LocalSignalingServer {
   LocalSignalingServer(const LocalSignalingServer&) = delete;
   LocalSignalingServer& operator=(const LocalSignalingServer&) = delete;
 
-  bool Start(int preferredPort, int maxConnections, const std::string& publicDir);
+  bool Start(int preferredPort, int maxConnections, const std::string& publicDir,
+             const std::string& preferredLanIp = "");
   void Stop();
 
   bool IsRunning() const;
   LanRoomInfo GetRoom() const;
+  std::vector<NetworkInterfaceInfo> GetNetworkInterfaces() const;
+  // Updates the advertised LAN IP (receiver URL / QR) without restarting. The listener
+  // binds 0.0.0.0, so existing connections and the room code are kept.
+  bool SetLocalIp(const std::string& ip);
   void SetSenderCallback(SenderCallback callback);
 
  private:

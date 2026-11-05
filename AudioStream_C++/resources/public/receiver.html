@@ -115,9 +115,25 @@
 
   var pc = null, ws = null, code = '', receiverId = '';
   var audioCtx = null, analyserNode = null, meterInterval = null, joined = false;
+  var sourceNode = null;
+  var playbackMode = 'none';
   var pendingCandidates = [];
   var remoteStream = null;
   var useTurnPath = false;
+  var currentJitterTarget = 20;
+  var metricTimer = null;
+  var metricTick = 0;
+  var METRIC_POST_EVERY = 10; // 每 10 秒上报一次到发送端日志
+  var lastEnergy = 0;
+  var latencyLabelText = '';
+  var lastConcealedSamples = 0;
+  var lastPacketsLost = 0;
+  var statsLossDelta = 0;
+  var statsJitterMs = 0;
+  var statsConcealedDelta = 0;
+  var stableStatsWindows = 0;
+  var latencyMode = 'stable';
+  var statsRttMs = 0;
   var diagLines = [];
 
   var ICE_SERVERS = [
@@ -155,6 +171,16 @@
     diagLog('STATUS', cls + ' - ' + text);
   }
 
+  function postMetric(message) {
+    try {
+      fetch('/engine-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code, message: '[receiver ' + (receiverId || '-') + '] ' + message })
+      }).catch(function() {});
+    } catch (_) {}
+  }
+
   function tuneOpusSdp(sdp) {
     if (!sdp) return sdp;
     return sdp.replace(/a=fmtp:(\d+) ([^\r\n]+)/g, function(line, pt, params) {
@@ -173,22 +199,23 @@
     stopMeter();
     remoteStream = stream;
     btnPlay.classList.add('hidden');
-
+    // 播放始终走 <audio> 元素：Chromium 中远端 WebRTC 流若未挂到媒体元素，
+    // WebAudio 拿到的是静音；iOS 上非手势创建的 AudioContext 也可能一直 suspended。
+    // WebAudio 仅用于电平表，不接 destination。
+    playbackMode = 'element';
     p2pAudio.srcObject = stream;
     p2pAudio.autoplay = true;
     p2pAudio.muted = false;
     p2pAudio.volume = 1;
 
-    if (pc && window.WebRTCLowLatency && WebRTCLowLatency.applyPlayout) {
-      WebRTCLowLatency.applyPlayout(pc, 20);
-    }
+    applyJitterTarget(currentJitterTarget);
 
     try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      var source = audioCtx.createMediaStreamSource(stream);
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
+      sourceNode = audioCtx.createMediaStreamSource(stream);
       analyserNode = audioCtx.createAnalyser();
       analyserNode.fftSize = 256;
-      source.connect(analyserNode);
+      sourceNode.connect(analyserNode);
     } catch (e) {
       diagLog('meter init err', e.message);
     }
@@ -200,25 +227,32 @@
       var sum = 0;
       for (var i = 0; i < data.length; i++) sum += data[i];
       var avg = sum / data.length;
+      lastEnergy = avg;
       meterFill.style.width = Math.min(100, Math.round(avg / 170 * 100)) + '%';
-      meterLabel.textContent = avg > 3 ? '' : '等待音频流…';
+      meterLabel.textContent = avg > 3 ? latencyLabelText : '等待音频流…';
     }, 150);
 
-    tryPlayAudio();
+    tryStartPlayback();
+    startMetricLoop();
   }
 
-  function tryPlayAudio() {
+  function resumeMeterContext() {
+    if (audioCtx && audioCtx.state === 'suspended' && audioCtx.resume) {
+      audioCtx.resume().catch(function() {});
+    }
+  }
+
+  function tryStartPlayback() {
     var playPromise = p2pAudio.play();
     if (!playPromise || typeof playPromise.then !== 'function') {
       setStatus('playing', '正在播放 🎵');
+      resumeMeterContext();
       return;
     }
     playPromise.then(function() {
       diagLog('AUDIO', 'element playing');
       setStatus('playing', '正在播放 🎵');
-      if (audioCtx && audioCtx.state === 'suspended') {
-        audioCtx.resume().catch(function() {});
-      }
+      resumeMeterContext();
     }).catch(function(err) {
       diagLog('AUDIO-ERR', err && err.message);
       setStatus('connected', '点击「播放」开始收听');
@@ -228,24 +262,151 @@
 
   window.resumePlayback = function() {
     btnPlay.classList.add('hidden');
-    if (audioCtx && audioCtx.state === 'suspended') {
-      audioCtx.resume().catch(function() {});
-    }
-    tryPlayAudio();
+    tryStartPlayback();
   };
 
   function stopMeter() {
     if (meterInterval) { clearInterval(meterInterval); meterInterval = null; }
+    if (metricTimer) { clearInterval(metricTimer); metricTimer = null; }
     if (analyserNode) { try { analyserNode.disconnect(); } catch(_) {} analyserNode = null; }
+    if (sourceNode) { try { sourceNode.disconnect(); } catch(_) {} sourceNode = null; }
     if (audioCtx && audioCtx.state !== 'closed') { audioCtx.close().catch(function(){}); audioCtx = null; }
     if (p2pAudio) {
       try { p2pAudio.pause(); } catch(_) {}
       p2pAudio.srcObject = null;
     }
     remoteStream = null;
+    playbackMode = 'none';
+    lastEnergy = 0;
+    latencyLabelText = '';
+    stableStatsWindows = 0;
+    lastPacketsLost = 0;
+    statsLossDelta = 0;
+    statsJitterMs = 0;
+    statsConcealedDelta = 0;
+    lastConcealedSamples = 0;
     meterFill.style.width = '0%';
     meterLabel.textContent = '等待音频流…';
     btnPlay.classList.add('hidden');
+  }
+
+  function applyJitterTarget(target) {
+    var minJ = latencyMode === '200ms' ? 12 : 16;
+    var maxJ = latencyMode === '200ms' ? 22 : 30;
+    currentJitterTarget = Math.max(minJ, Math.min(maxJ, target));
+    try {
+      if (pc && pc.getReceivers) {
+        pc.getReceivers().forEach(function(r) {
+          if (r.track && r.track.kind === 'audio' && 'jitterBufferTarget' in r) {
+            r.jitterBufferTarget = currentJitterTarget;
+          }
+        });
+      }
+      if (window.WebRTCLowLatency && WebRTCLowLatency.applyPlayout && pc) {
+        WebRTCLowLatency.applyPlayout(pc, currentJitterTarget);
+      }
+    } catch (_) {}
+  }
+
+  function collectReceiverStats() {
+    if (!pc || typeof pc.getStats !== 'function') return Promise.resolve();
+    return pc.getStats().then(function(report) {
+      var packetsLost = null;
+      var jitterSec = null;
+      var concealedSamples = null;
+      report.forEach(function(stat) {
+        if (stat.type === 'inbound-rtp' && stat.kind === 'audio') {
+          if (typeof stat.packetsLost === 'number') packetsLost = stat.packetsLost;
+          if (typeof stat.jitter === 'number') jitterSec = stat.jitter;
+          if (typeof stat.concealedSamples === 'number') concealedSamples = stat.concealedSamples;
+        }
+        if (stat.type === 'candidate-pair' && stat.state === 'succeeded' && typeof stat.currentRoundTripTime === 'number') {
+          statsRttMs = Math.round(stat.currentRoundTripTime * 1000);
+        }
+      });
+      if (packetsLost !== null) {
+        statsLossDelta = Math.max(0, packetsLost - lastPacketsLost);
+        lastPacketsLost = packetsLost;
+      }
+      if (jitterSec !== null) {
+        statsJitterMs = Math.round(jitterSec * 1000);
+      }
+      if (concealedSamples !== null) {
+        statsConcealedDelta = Math.max(0, concealedSamples - lastConcealedSamples);
+        lastConcealedSamples = concealedSamples;
+      }
+    }).catch(function() {});
+  }
+
+  function adaptJitterByStats() {
+    if (!pc || !remoteStream) return;
+    var jitterUp = latencyMode === '200ms' ? 12 : 14;
+    var downNeed = latencyMode === '200ms' ? 8 : 12;
+    var downFloor = latencyMode === '200ms' ? 13 : 18;
+    var downWindows = latencyMode === '200ms' ? 8 : 12;
+    if (statsLossDelta > 0 || statsConcealedDelta > 0 || statsJitterMs > jitterUp) {
+      applyJitterTarget(currentJitterTarget + 2);
+      stableStatsWindows = 0;
+      diagLog('JITTER', 'stats up to ' + currentJitterTarget + ' lossΔ=' + statsLossDelta + ' jitter=' + statsJitterMs);
+      return;
+    }
+    if (statsLossDelta === 0 && statsConcealedDelta === 0 && statsJitterMs > 0 && statsJitterMs < downNeed && lastEnergy > (latencyMode === '200ms' ? 6 : 10)) {
+      stableStatsWindows += 1;
+      if (stableStatsWindows >= downWindows && currentJitterTarget > downFloor) {
+        applyJitterTarget(currentJitterTarget - 1);
+        stableStatsWindows = 0;
+        diagLog('JITTER', 'stats down to ' + currentJitterTarget);
+      }
+    } else {
+      stableStatsWindows = 0;
+    }
+  }
+
+  // 仅接收端部分（抖动缓冲 + 网络单程 + 解码/输出），不含发送端采集与排队
+  function estimateReceiverLatencyMs() {
+    var oneWay = statsRttMs > 0 ? Math.round(statsRttMs / 2) : 0;
+    return currentJitterTarget + statsJitterMs + 25 + oneWay;
+  }
+
+  function applyLatencyModeFromUrl() {
+    var params = new URLSearchParams(location.search || '');
+    var mode = (params.get('latencyMode') || '').toLowerCase();
+    if (mode === '200ms' || mode === 'low200') {
+      latencyMode = '200ms';
+      currentJitterTarget = 14;
+    } else {
+      latencyMode = 'stable';
+      currentJitterTarget = 20;
+    }
+  }
+
+  function startMetricLoop() {
+    if (metricTimer) return;
+    metricTimer = setInterval(function() {
+      var ice = pc ? pc.iceConnectionState : 'none';
+      var conn = pc ? pc.connectionState : 'none';
+      collectReceiverStats().finally(function() {
+        var estMs = estimateReceiverLatencyMs();
+        var msg =
+          'metric mode=' + latencyMode +
+          ' rxMs=' + estMs +
+          ' jitter=' + currentJitterTarget +
+          ' energy=' + Math.round(lastEnergy) +
+          ' ice=' + ice +
+          ' conn=' + conn +
+          ' rtt=' + statsRttMs +
+          ' statsJitter=' + statsJitterMs +
+          ' lossΔ=' + statsLossDelta +
+          ' concealΔ=' + statsConcealedDelta;
+        diagLog('METRIC', msg);
+        metricTick += 1;
+        if (metricTick % METRIC_POST_EVERY === 0) postMetric(msg);
+        if (remoteStream) {
+          latencyLabelText = '接收端延时 ~' + estMs + 'ms（不含发送端）';
+        }
+        adaptJitterByStats();
+      });
+    }, 1000);
   }
 
   // ── WebSocket ──
@@ -392,7 +553,7 @@
       diagLog('ICE-STATE', pc.iceConnectionState);
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         setStatus('connected', '音频通道已连通');
-        if (remoteStream && p2pAudio.paused) tryPlayAudio();
+        if (remoteStream && p2pAudio.paused) tryStartPlayback();
       }
       if (pc.iceConnectionState === 'failed') {
         if (!useTurnPath) {
@@ -450,15 +611,7 @@
     }
     diagLog('ANSWER', 'created and set');
 
-    try {
-      if (pc.getReceivers) {
-        pc.getReceivers().forEach(function(r) {
-          if (r.track && r.track.kind === 'audio' && 'jitterBufferTarget' in r) {
-            r.jitterBufferTarget = 20;
-          }
-        });
-      }
-    } catch(_) {}
+    applyJitterTarget(currentJitterTarget);
 
     if (ws && ws.readyState === 1) {
       ws.send(JSON.stringify({
@@ -497,6 +650,7 @@
 
   // ── Init ──
   var params = new URLSearchParams(location.search);
+  applyLatencyModeFromUrl();
   code = (params.get('code') || '').toUpperCase();
   if (!code) code = (location.hash.replace('#','') || '').toUpperCase();
   if (!code) {
@@ -507,7 +661,7 @@
   }
   devId.textContent = '房间 ' + code;
   setStatus('connecting', '正在连接…');
-  diagLog('INIT', 'code=' + code + ' host=' + location.host);
+  diagLog('INIT', 'code=' + code + ' host=' + location.host + ' mode=' + latencyMode);
   connectWS();
 })();
 </script>

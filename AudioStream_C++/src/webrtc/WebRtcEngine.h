@@ -21,6 +21,7 @@ class WebRtcEngine {
   WebRtcEngine& operator=(const WebRtcEngine&) = delete;
 
   void SetEventCallback(EventCallback callback);
+  void SetLatencyMode(bool target200ms);
   bool Start(HWND parentWindow, const std::string& engineUrl);
   void EnsureAudioPipeline();
   void Stop();

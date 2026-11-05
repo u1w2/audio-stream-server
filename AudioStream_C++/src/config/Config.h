@@ -14,9 +14,16 @@ enum class AppLocale {
   kEnUS,
 };
 
+enum class LatencyMode {
+  kStable,
+  kTarget200ms,
+};
+
 struct AppConfig {
   Mode defaultMode = Mode::kLan;
+  LatencyMode latencyMode = LatencyMode::kStable;
   std::string cloudServer;
+  std::string lanIp;
   int localPort = 0;
   int maxConnections = 5;
   bool autoLaunch = false;

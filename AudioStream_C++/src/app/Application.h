@@ -29,7 +29,16 @@ class Application {
   bool HandleWindowMessage(UINT msg, WPARAM wparam, LPARAM lparam);
   void ShowMainWindow();
   void ExitApplication();
+  bool StartLanServices();
+  bool RestartLanServices();
+  void RefreshLanInterfaceOptions();
+  void ApplyLanIpFromUi();
+  void RefreshLatencyModeUi();
+  void ApplyLatencyModeFromUi();
+  std::string BuildEngineUrl(int port) const;
+  std::string ReceiverUrlWithMode(const std::string& baseUrl) const;
   void UpdateRoomDisplay();
+  void UpdateReceiverUrlDisplay();
   void UpdateReceiverDisplay();
   void OnSignalingMessage(const std::string& messageJson);
 

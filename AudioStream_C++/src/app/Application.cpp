@@ -10,11 +10,14 @@
 #include "util/QrBitmap.h"
 #include "util/SingleInstanceGuard.h"
 #include "util/StringUtil.h"
+#include "util/NetUtil.h"
 #include "webrtc/WebRtcEngine.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -28,6 +31,14 @@ constexpr UINT kRefreshReceiversMessage = WM_APP + 43;
 
 std::string ModeToString(const Mode mode) {
   return mode == Mode::kCloud ? "cloud" : "lan";
+}
+
+std::string AppendQueryParam(const std::string& url, const std::string& key, const std::string& value) {
+  std::ostringstream out;
+  out << url;
+  out << (url.find('?') != std::string::npos ? '&' : '?');
+  out << key << '=' << value;
+  return out.str();
 }
 
 }  // namespace
@@ -102,9 +113,7 @@ bool Application::Initialize() {
   localSignaling_->SetSenderCallback(
       [this](const std::string& messageJson) { OnSignalingMessage(messageJson); });
 
-  const auto publicDir = Paths::PublicAssetsDirectory().string();
-  Logger::Info("Public assets directory: " + publicDir);
-  if (!localSignaling_->Start(config_.localPort, config_.maxConnections, publicDir)) {
+  if (!StartLanServices()) {
     Logger::Error("Failed to start local signaling server");
     return false;
   }
@@ -116,27 +125,9 @@ bool Application::Initialize() {
   }
 
   UpdateRoomDisplay();
-
+  RefreshLanInterfaceOptions();
+  RefreshLatencyModeUi();
   const LanRoomInfo room = localSignaling_->GetRoom();
-  webrtcEngine_ = new WebRtcEngine();
-  webrtcEngine_->SetEventCallback([this](const std::string& event) {
-    if (event == "capture-started") {
-      audioCaptured_ = true;
-      if (mainWindow_ != nullptr) {
-        PostMessageW(mainWindow_->window.Handle(), kRefreshReceiversMessage, 0, 0);
-      }
-    } else if (event == "capture-failed") {
-      audioCaptured_ = false;
-      if (mainWindow_ != nullptr) {
-        mainWindow_->window.SetAudioStatusText(i18n::Tr(L"status.audio_failed"));
-      }
-    }
-  });
-  const std::string engineUrl = "http://127.0.0.1:" + std::to_string(room.port) + "/sender-engine.html";
-  if (!webrtcEngine_->Start(mainWindow_->window.Handle(), engineUrl)) {
-    Logger::Warn("WebRTC engine failed to start; receivers will connect but audio may be unavailable");
-  }
-
   Logger::Info("Room code: " + room.code);
   Logger::Info("Receiver URL: " + room.receiverUrl);
   Logger::Info("AudioStream C++ phase-2 LAN server started");
@@ -205,6 +196,14 @@ bool Application::HandleWindowMessage(const UINT msg, const WPARAM wparam, const
       ExitApplication();
       return true;
     }
+    if (commandId == ui::MainWindow::kControlLanApplyButton) {
+      ApplyLanIpFromUi();
+      return true;
+    }
+    if (commandId == ui::MainWindow::kControlLatencyApplyButton) {
+      ApplyLatencyModeFromUi();
+      return true;
+    }
   }
 
   return false;
@@ -225,6 +224,195 @@ void Application::ExitApplication() {
   }
 }
 
+bool Application::StartLanServices() {
+  const auto publicDir = Paths::PublicAssetsDirectory().string();
+  Logger::Info("Public assets directory: " + publicDir);
+  std::string preferredLanIp = config_.lanIp;
+  char* envLanIp = nullptr;
+  size_t envLanIpLen = 0;
+  if (_dupenv_s(&envLanIp, &envLanIpLen, "AUDIOSTREAM_LAN_IP") == 0 && envLanIp != nullptr &&
+      envLanIp[0] != '\0') {
+    preferredLanIp = envLanIp;
+    Logger::Info("Using LAN IP from AUDIOSTREAM_LAN_IP: " + preferredLanIp);
+  }
+  if (envLanIp != nullptr) {
+    free(envLanIp);
+  }
+  // Always tear down the previous engine first so a failed signaling start never leaves an
+  // engine pointed at a dead port.
+  if (webrtcEngine_ != nullptr) {
+    webrtcEngine_->Stop();
+    delete webrtcEngine_;
+    webrtcEngine_ = nullptr;
+  }
+  if (!localSignaling_->Start(config_.localPort, config_.maxConnections, publicDir, preferredLanIp)) {
+    return false;
+  }
+
+  const LanRoomInfo room = localSignaling_->GetRoom();
+  webrtcEngine_ = new WebRtcEngine();
+  webrtcEngine_->SetLatencyMode(config_.latencyMode == LatencyMode::kTarget200ms);
+  webrtcEngine_->SetEventCallback([this](const std::string& event) {
+    if (event == "capture-started") {
+      audioCaptured_ = true;
+      if (mainWindow_ != nullptr) {
+        PostMessageW(mainWindow_->window.Handle(), kRefreshReceiversMessage, 0, 0);
+      }
+    } else if (event == "capture-failed") {
+      audioCaptured_ = false;
+      if (mainWindow_ != nullptr) {
+        mainWindow_->window.SetAudioStatusText(i18n::Tr(L"status.audio_failed"));
+      }
+    }
+  });
+  const std::string engineUrl = BuildEngineUrl(room.port);
+  if (!webrtcEngine_->Start(mainWindow_->window.Handle(), engineUrl)) {
+    Logger::Warn("WebRTC engine failed to start; receivers will connect but audio may be unavailable");
+  }
+  return true;
+}
+
+void Application::RefreshLanInterfaceOptions() {
+  if (mainWindow_ == nullptr || localSignaling_ == nullptr) {
+    return;
+  }
+  const auto interfaces = localSignaling_->GetNetworkInterfaces();
+  std::vector<std::wstring> items;
+  items.reserve(interfaces.size());
+  for (const auto& iface : interfaces) {
+    std::wstring item = Utf8ToWide(iface.name);
+    item += L" [";
+    item += Utf8ToWide(iface.address);
+    item += L"]";
+    items.push_back(item);
+  }
+  std::wstring selected = config_.lanIp.empty() ? Utf8ToWide(localSignaling_->GetRoom().localIp)
+                                                 : Utf8ToWide(config_.lanIp);
+  mainWindow_->window.SetLanInterfaceList(items, selected);
+}
+
+void Application::ApplyLanIpFromUi() {
+  if (mainWindow_ == nullptr || localSignaling_ == nullptr) {
+    return;
+  }
+  const std::wstring selectedIpWide = mainWindow_->window.GetSelectedLanIp();
+  std::string selectedIp;
+  selectedIp.reserve(selectedIpWide.size());
+  for (const wchar_t ch : selectedIpWide) {
+    if (ch > 0x7F) {
+      selectedIp.clear();  // IPv4 text is ASCII-only; anything else is not an IP
+      break;
+    }
+    selectedIp.push_back(static_cast<char>(ch));
+  }
+  if (!IsValidIPv4(selectedIp)) {
+    mainWindow_->window.SetStatusText(i18n::Tr(L"status.lan_ip_apply_failed"));
+    return;
+  }
+  if (selectedIp == localSignaling_->GetRoom().localIp) {
+    if (config_.lanIp != selectedIp) {
+      config_.lanIp = selectedIp;
+      const ConfigService configService;
+      configService.Save(config_);
+    }
+    mainWindow_->window.SetStatusText(i18n::Tr(L"status.lan_ip_applied"));
+    return;
+  }
+
+  // The listener binds 0.0.0.0, so only the advertised URL/QR changes: no restart, the room
+  // code and already-connected receivers are kept.
+  if (!localSignaling_->SetLocalIp(selectedIp)) {
+    mainWindow_->window.SetStatusText(i18n::Tr(L"status.lan_ip_apply_failed"));
+    RefreshLanInterfaceOptions();
+    return;
+  }
+  config_.lanIp = selectedIp;
+  const ConfigService configService;
+  configService.Save(config_);
+  UpdateReceiverUrlDisplay();
+  mainWindow_->window.SetStatusText(i18n::Tr(L"status.lan_ip_applied"));
+}
+
+std::string Application::BuildEngineUrl(const int port) const {
+  std::ostringstream url;
+  url << "http://127.0.0.1:" << port << "/sender-engine.html";
+  if (config_.latencyMode == LatencyMode::kTarget200ms) {
+    // AudioWorklet: 128-frame render quantum instead of a 256-frame ScriptProcessor buffer.
+    // sender-engine falls back to ScriptProcessor automatically if the worklet fails to load.
+    url << "?latencyMode=200ms&profile=low&autoLow=0&worklet=1";
+  } else {
+    url << "?latencyMode=stable&profile=stable&autoLow=0";
+  }
+  return url.str();
+}
+
+std::string Application::ReceiverUrlWithMode(const std::string& baseUrl) const {
+  if (config_.latencyMode == LatencyMode::kTarget200ms) {
+    return AppendQueryParam(baseUrl, "latencyMode", "200ms");
+  }
+  return AppendQueryParam(baseUrl, "latencyMode", "stable");
+}
+
+void Application::RefreshLatencyModeUi() {
+  if (mainWindow_ == nullptr) {
+    return;
+  }
+  mainWindow_->window.SetLatencyModeSelection(config_.latencyMode == LatencyMode::kTarget200ms);
+  if (config_.latencyMode == LatencyMode::kTarget200ms) {
+    mainWindow_->window.SetLatencyEstimateText(i18n::Tr(L"latency.estimate.200ms"));
+  } else {
+    mainWindow_->window.SetLatencyEstimateText(i18n::Tr(L"latency.estimate.stable"));
+  }
+}
+
+bool Application::RestartLanServices() {
+  {
+    std::lock_guard<std::mutex> lock(receiversMutex_);
+    receivers_.clear();
+  }
+  audioCaptured_ = false;
+  audioStreaming_ = false;
+  localSignaling_->Stop();
+  return StartLanServices();
+}
+
+void Application::ApplyLatencyModeFromUi() {
+  if (mainWindow_ == nullptr || localSignaling_ == nullptr) {
+    return;
+  }
+  const LatencyMode selectedMode =
+      mainWindow_->window.IsLatencyMode200msSelected() ? LatencyMode::kTarget200ms
+                                                      : LatencyMode::kStable;
+  if (selectedMode == config_.latencyMode) {
+    RefreshLatencyModeUi();
+    mainWindow_->window.SetStatusText(i18n::Tr(L"status.latency_mode_applied"));
+    return;
+  }
+
+  const LatencyMode previousMode = config_.latencyMode;
+  config_.latencyMode = selectedMode;
+  if (!RestartLanServices()) {
+    // Roll back to the last working mode instead of leaving the app without a server.
+    Logger::Error("Latency mode restart failed; rolling back");
+    config_.latencyMode = previousMode;
+    const bool recovered = RestartLanServices();
+    if (recovered) {
+      UpdateRoomDisplay();
+      RefreshLanInterfaceOptions();
+    }
+    RefreshLatencyModeUi();
+    mainWindow_->window.SetStatusText(i18n::Tr(L"status.latency_mode_apply_failed"));
+    return;
+  }
+
+  const ConfigService configService;
+  configService.Save(config_);
+  UpdateRoomDisplay();
+  RefreshLanInterfaceOptions();
+  RefreshLatencyModeUi();
+  mainWindow_->window.SetStatusText(i18n::Tr(L"status.latency_mode_applied"));
+}
+
 void Application::UpdateRoomDisplay() {
   if (localSignaling_ == nullptr || mainWindow_ == nullptr) {
     return;
@@ -239,13 +427,20 @@ void Application::UpdateRoomDisplay() {
   }
   mainWindow_->window.SetStatusText(status);
   mainWindow_->window.SetRoomCode(Utf8ToWide(room.code));
-  mainWindow_->window.SetReceiverUrl(Utf8ToWide(room.receiverUrl));
   mainWindow_->window.SetAudioStatusText(i18n::Tr(L"status.audio_waiting"));
   audioStreaming_ = false;
   audioCaptured_ = false;
   UpdateReceiverDisplay();
+  UpdateReceiverUrlDisplay();
+}
 
-  HBITMAP qrBitmap = QrBitmap::CreateFromUtf8(room.receiverUrl, 200);
+void Application::UpdateReceiverUrlDisplay() {
+  if (localSignaling_ == nullptr || mainWindow_ == nullptr) {
+    return;
+  }
+  const std::string receiverUrl = ReceiverUrlWithMode(localSignaling_->GetRoom().receiverUrl);
+  mainWindow_->window.SetReceiverUrl(Utf8ToWide(receiverUrl));
+  HBITMAP qrBitmap = QrBitmap::CreateFromUtf8(receiverUrl, 200);
   if (qrBitmap != nullptr) {
     mainWindow_->window.SetQrBitmap(qrBitmap);
   } else {

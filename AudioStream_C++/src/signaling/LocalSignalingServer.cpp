@@ -129,6 +129,32 @@ LanRoomInfo LocalSignalingServer::GetRoom() const {
   return impl_->room;
 }
 
+std::vector<NetworkInterfaceInfo> LocalSignalingServer::GetNetworkInterfaces() const {
+  return ListLocalIPv4Interfaces();
+}
+
+bool LocalSignalingServer::SetLocalIp(const std::string& ip) {
+  if (!IsValidIPv4(ip)) {
+    return false;
+  }
+  bool known = false;
+  for (const auto& iface : ListLocalIPv4Interfaces()) {
+    if (iface.address == ip) {
+      known = true;
+      break;
+    }
+  }
+  if (!known) {
+    Logger::Warn("SetLocalIp rejected: " + ip + " is not a local IPv4 interface");
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->room.localIp = ip;
+  impl_->room.receiverUrl = BuildReceiverUrl(ip, impl_->room.port, impl_->room.code);
+  Logger::Info("Advertised LAN IP changed to " + ip);
+  return true;
+}
+
 static void SendJson(struct mg_connection* connection, const std::string& json) {
   if (connection == nullptr) {
     return;
@@ -216,7 +242,9 @@ static void HandleHttpRequest(LocalSignalingServerImpl* impl, struct mg_connecti
                               struct mg_http_message* hm) {
   const std::string method = MgStrToString(hm->method);
   const std::string uri = MgStrToString(hm->uri);
-  Logger::Info("HTTP " + method + " " + uri);
+  if (uri != "/engine-log") {
+    Logger::Info("HTTP " + method + " " + uri);
+  }
 
   if (IsWebSocketUpgrade(hm)) {
     const std::string query = MgStrToString(hm->query);
@@ -248,9 +276,33 @@ static void HandleHttpRequest(LocalSignalingServerImpl* impl, struct mg_connecti
 
   if (method == "POST" && uri == "/engine-log") {
     const std::string body = MgStrToString(hm->body);
-    const std::string message = JsonGetString(body, "message");
+    // Loopback = sender-engine (WebView2). LAN clients must present the current room code.
+    const bool isLoopback = !c->rem.is_ip6 && c->rem.addr.ip[0] == 127;
+    if (!isLoopback) {
+      const std::string code = JsonGetString(body, "code");
+      std::string roomCode;
+      {
+        std::lock_guard<std::mutex> lock(impl->mutex);
+        roomCode = impl->room.code;
+      }
+      if (code.empty() || code != roomCode) {
+        mg_http_reply(c, 403, "", "");
+        return;
+      }
+    }
+    std::string message = JsonGetString(body, "message");
+    constexpr size_t kMaxEngineLogChars = 512;
+    if (message.size() > kMaxEngineLogChars) {
+      message.resize(kMaxEngineLogChars);
+      message += "...";
+    }
+    for (char& ch : message) {
+      if (static_cast<unsigned char>(ch) < 0x20) {
+        ch = ' ';  // no CR/LF/control chars -> no forged log lines
+      }
+    }
     if (!message.empty()) {
-      Logger::Info("Engine: " + message);
+      Logger::Info(std::string(isLoopback ? "Engine: " : "Receiver: ") + message);
     }
     mg_http_reply(c, 204, "", "");
     return;
@@ -452,7 +504,8 @@ static void EventHandler(struct mg_connection* c, int ev, void* ev_data) {
 }
 
 bool LocalSignalingServer::Start(const int preferredPort, const int maxConnections,
-                                 const std::string& publicDir) {
+                                 const std::string& publicDir,
+                                 const std::string& preferredLanIp) {
   if (impl_->running.load()) {
     return true;
   }
@@ -462,7 +515,21 @@ bool LocalSignalingServer::Start(const int preferredPort, const int maxConnectio
     Logger::Error("Public web assets are missing; receiver page will not load");
   }
 
-  const std::string localIp = PickBestLocalIPv4();
+  const auto interfaces = ListLocalIPv4Interfaces();
+  if (!interfaces.empty()) {
+    std::ostringstream allIps;
+    for (size_t i = 0; i < interfaces.size(); ++i) {
+      if (i > 0) {
+        allIps << ", ";
+      }
+      allIps << interfaces[i].address << " (" << interfaces[i].name << ")";
+    }
+    Logger::Info("Available LAN IPv4 interfaces: " + allIps.str());
+  }
+  const std::string localIp = PickBestLocalIPv4(preferredLanIp);
+  if (!preferredLanIp.empty()) {
+    Logger::Info("Preferred LAN IP requested: " + preferredLanIp);
+  }
   Logger::Info("Selected local IP: " + localIp);
   impl_->room.code = GenerateRoomCode();
   impl_->room.senderToken = RandomHex(16);

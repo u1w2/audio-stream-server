@@ -13,6 +13,11 @@ namespace audiostream::ui {
 
 class MainWindow {
  public:
+  static constexpr int kControlLanApplyButton = 1101;
+  static constexpr int kControlLanCombo = 1102;
+  static constexpr int kControlLatencyApplyButton = 1103;
+  static constexpr int kControlLatencyCombo = 1104;
+
   MainWindow();
   ~MainWindow();
 
@@ -28,7 +33,13 @@ class MainWindow {
   void SetReceiverUrl(const std::wstring& url);
   void SetQrBitmap(HBITMAP bitmap);
   void SetAudioStatusText(const std::wstring& text);
+  void SetLatencyEstimateText(const std::wstring& text);
   void SetReceiverList(const std::vector<std::wstring>& receivers);
+  void SetLanInterfaceList(const std::vector<std::wstring>& interfaces,
+                           const std::wstring& selectedIp);
+  std::wstring GetSelectedLanIp() const;
+  void SetLatencyModeSelection(bool target200ms);
+  bool IsLatencyMode200msSelected() const;
 
   using MessageHandler = std::function<bool(UINT, WPARAM, LPARAM)>;
   void SetMessageHandler(MessageHandler handler);
@@ -53,6 +64,13 @@ class MainWindow {
   HWND audioStatusText_;
   HWND labelReceivers_;
   HWND receiverList_;
+  HWND labelLanIp_;
+  HWND comboLanIp_;
+  HWND buttonLanApply_;
+  HWND labelLatencyMode_;
+  HWND comboLatencyMode_;
+  HWND buttonLatencyApply_;
+  HWND latencyEstimateText_;
   HBITMAP qrBitmap_;
   MessageHandler messageHandler_;
 };
