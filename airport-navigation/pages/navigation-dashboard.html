@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能导航主界面</title>
+    <style id="theme-vars">
+:root {
+  /* === Brand Colors === */
+  --brand-primary: #E91E63;
+  --brand-primary-dark: #C2185B;
+  --brand-primary-light: #F06292;
+  --brand-primary-gradient: linear-gradient(135deg, #E91E63, #C2185B);
+  --brand-primary-gradient-light: linear-gradient(135deg, #F06292, #E91E63);
+
+  /* === Backgrounds === */
+  --bg-body: #F0F2F5;
+  --bg-surface: #FFFFFF;
+  --bg-surface-elevated: #FFFFFF;
+  --bg-sidebar: #FAFBFC;
+  --bg-header: #FFFFFF;
+  --bg-overlay: rgba(0, 0, 0, 0.45);
+
+  /* === Text Colors === */
+  --text-primary: #1A1A2E;
+  --text-secondary: #555770;
+  --text-tertiary: #8E8EA9;
+  --text-inverse: #FFFFFF;
+  --text-accent: #E91E63;
+
+  /* === Border / Divider === */
+  --border-default: #E8EAF0;
+  --border-light: #F0F1F5;
+  --divider: #ECEEF3;
+
+  /* === Semantic Colors === */
+  --state-success: #4CAF50;
+  --state-warning: #FF9800;
+  --state-error: #F44336;
+  --state-info: #2196F3;
+
+  /* === Shadows === */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-float: 0 4px 20px rgba(0, 0, 0, 0.12);
+
+  /* === Radius === */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 9999px;
+
+  /* === Typography === */
+  --font-family: 'PingFang SC', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-base: 14px;
+  --font-size-md: 15px;
+  --font-size-lg: 18px;
+  --font-size-xl: 22px;
+  --font-size-2xl: 28px;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+
+  /* === Spacing === */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 20px;
+  --spacing-2xl: 24px;
+  --spacing-3xl: 32px;
+}
+
+/* === Prefixed Semantic Aliases (sz-airport) === */
+:root {
+  --sz-airport-background: var(--bg-body);
+  --sz-airport-foreground: var(--text-primary);
+  --sz-airport-card: var(--bg-surface);
+  --sz-airport-primary: var(--brand-primary);
+  --sz-airport-border: var(--border-default);
+  --sz-airport-muted: var(--text-tertiary);
+  --sz-airport-radius-sm: var(--radius-sm);
+  --sz-airport-radius-md: var(--radius-md);
+  --sz-airport-radius-lg: var(--radius-lg);
+}
+
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--sz-airport-background);
+    --color-foreground: var(--sz-airport-foreground);
+    --color-card: var(--sz-airport-card);
+    --color-primary: var(--sz-airport-primary);
+    --color-muted: var(--sz-airport-muted);
+    --color-border: var(--sz-airport-border);
+    --radius-sm: var(--sz-airport-radius-sm);
+    --radius-md: var(--sz-airport-radius-md);
+    --radius-lg: var(--sz-airport-radius-lg);
+  }
+  @layer base {
+    body { background: var(--sz-airport-background); color: var(--sz-airport-foreground); }
+    td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
+    th { @apply whitespace-nowrap; }
+  }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--sz-airport-background); }
+      .text-background { color: var(--sz-airport-background); }
+      .border-background { border-color: var(--sz-airport-background); }
+      .ring-background { --tw-ring-color: var(--sz-airport-background); }
+      .bg-foreground { background-color: var(--sz-airport-foreground); }
+      .text-foreground { color: var(--sz-airport-foreground); }
+      .border-foreground { border-color: var(--sz-airport-foreground); }
+      .ring-foreground { --tw-ring-color: var(--sz-airport-foreground); }
+      .bg-card { background-color: var(--sz-airport-card); }
+      .text-card { color: var(--sz-airport-card); }
+      .border-card { border-color: var(--sz-airport-card); }
+      .ring-card { --tw-ring-color: var(--sz-airport-card); }
+      .bg-primary { background-color: var(--sz-airport-primary); }
+      .text-primary { color: var(--sz-airport-primary); }
+      .border-primary { border-color: var(--sz-airport-primary); }
+      .ring-primary { --tw-ring-color: var(--sz-airport-primary); }
+      .bg-muted { background-color: var(--sz-airport-muted); }
+      .text-muted { color: var(--sz-airport-muted); }
+      .border-muted { border-color: var(--sz-airport-muted); }
+      .ring-muted { --tw-ring-color: var(--sz-airport-muted); }
+      .bg-border { background-color: var(--sz-airport-border); }
+      .text-border { color: var(--sz-airport-border); }
+      .border-border { border-color: var(--sz-airport-border); }
+      .ring-border { --tw-ring-color: var(--sz-airport-border); }
+    </style>
+    <style>
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      [data-icon] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+        background-color: currentColor;
+      }
+    </style>
+</head>
+<body class="h-screen overflow-hidden font-sans antialiased" style="font-family: var(--font-family);">
+    <div data-viewport-mode="app-shell" class="h-screen overflow-hidden min-h-0 flex flex-col">
+        <!-- ========== TOP HEADER BAR (vc-02) ========== -->
+        <header class="h-14 shrink-0 flex items-center justify-between px-5 border-b" style="background: var(--bg-header); border-color: var(--border-default); box-shadow: var(--shadow-sm);">
+            <!-- Left: Logo + Title -->
+            <div class="flex items-center gap-3">
+                <div class="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style="background: var(--brand-primary-gradient);">
+                    <i data-lucide="plane" class="w-5 h-5" style="color: var(--text-inverse);"></i>
+                </div>
+                <div>
+                    <h1 class="text-sm font-semibold leading-tight truncate" style="color: var(--text-primary);">深圳宝安国际机场</h1>
+                    <span class="text-xs leading-tight" style="color: var(--text-tertiary);">T3航站楼</span>
+                </div>
+            </div>
+            <!-- Center: Weather -->
+            <div class="flex items-center gap-2 px-4 py-1.5 rounded-full" style="background: var(--bg-body);">
+                <i data-lucide="cloud" class="w-4 h-4" style="color: var(--text-tertiary);"></i>
+                <span class="text-xs font-medium" style="color: var(--text-secondary);">28°C 多云</span>
+            </div>
+            <!-- Right: Time / Date -->
+            <div class="flex items-center gap-3">
+                <div class="text-right">
+                    <div class="text-sm font-semibold" style="color: var(--text-primary);">10:30</div>
+                    <div class="text-xs" style="color: var(--text-tertiary);">2026-07-15 周三</div>
+                </div>
+                <div class="w-8 h-8 rounded-full flex items-center justify-center" style="background: var(--bg-body);">
+                    <i data-lucide="bell" class="w-4 h-4" style="color: var(--text-tertiary);"></i>
+                </div>
+                <div class="w-8 h-8 rounded-full overflow-hidden shrink-0" style="background: linear-gradient(135deg, #F06292, #E91E63);">
+                    <div class="w-full h-full flex items-center justify-center">
+                        <i data-lucide="user" class="w-4 h-4" style="color: white;"></i>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- ========== MAIN THREE-COLUMN AREA (vc-01) ========== -->
+        <div class="flex-1 min-h-0 flex" style="background: var(--bg-body);">
+
+            <!-- ===== LEFT SIDEBAR ~20% (vc-03, vc-10) ===== -->
+            <aside class="shrink-0 flex flex-col gap-3 p-3 overflow-y-auto no-scrollbar" style="width: 20%; min-width: 240px; max-width: 320px;">
+                <!-- Robot Card -->
+                <div class="rounded-xl p-4 flex flex-col gap-3" style="background: var(--bg-surface); box-shadow: var(--shadow-card);">
+                    <!-- Robot 3D Image -->
+                    <div class="rounded-lg overflow-hidden" style="height: 140px; background: linear-gradient(135deg, #FCE4EC, #F8BBD0);">
+                        <img src="../assets/robot-3d.jpg" alt="导航机器人" class="w-full h-full object-cover">
+                    </div>
+                    <!-- Robot Name + Badge (vc-10) -->
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm font-semibold" style="color: var(--text-primary);">小深</span>
+                            <span class="px-2 py-0.5 rounded-full text-xs font-medium" style="background: #FCE4EC; color: var(--brand-primary);">SHEN-001</span>
+                        </div>
+                        <!-- Connection indicator -->
+                        <div class="flex items-center gap-1">
+                            <div class="w-2 h-2 rounded-full" style="background: var(--state-success);"></div>
+                            <span class="text-xs" style="color: var(--state-success);">在线</span>
+                        </div>
+                    </div>
+                    <!-- Status Tag: 进行中 -->
+                    <div class="flex items-center gap-2">
+                        <span class="px-2 py-0.5 rounded-full text-xs font-semibold whitespace-nowrap" style="background: var(--brand-primary); color: var(--text-inverse);">进行中</span>
+                        <span class="text-xs truncate" style="color: var(--text-secondary);">正在导航至登机口332</span>
+                    </div>
+                </div>
+
+                <!-- Stats Gauges Card -->
+                <div class="rounded-xl p-4 flex flex-col gap-4" style="background: var(--bg-surface); box-shadow: var(--shadow-card);">
+                    <h3 class="text-xs font-semibold" style="color: var(--text-tertiary);">机器人状态</h3>
+                    <!-- Speed Gauge -->
+                    <div class="flex items-center gap-3">
+                        <div class="relative w-12 h-12 rounded-full shrink-0" style="background: conic-gradient(var(--brand-primary) 0deg 200deg, var(--border-light) 200deg 360deg);">
+                            <div class="absolute inset-1 rounded-full flex items-center justify-center" style="background: var(--bg-surface);">
+                                <i data-lucide="gauge" class="w-4 h-4" style="color: var(--brand-primary);"></i>
+                            </div>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="text-xs" style="color: var(--text-tertiary);">当前速度</div>
+                            <div class="text-sm font-semibold" style="color: var(--text-primary);">6 km/h</div>
+                        </div>
+                    </div>
+                    <!-- Range Gauge -->
+                    <div class="flex items-center gap-3">
+                        <div class="relative w-12 h-12 rounded-full shrink-0" style="background: conic-gradient(var(--brand-primary-light) 0deg 108deg, var(--border-light) 108deg 360deg);">
+                            <div class="absolute inset-1 rounded-full flex items-center justify-center" style="background: var(--bg-surface);">
+                                <i data-lucide="route" class="w-4 h-4" style="color: var(--brand-primary-light);"></i>
+                            </div>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="text-xs" style="color: var(--text-tertiary);">剩余里程</div>
+                            <div class="text-sm font-semibold" style="color: var(--text-primary);">18 km</div>
+                        </div>
+                    </div>
+                    <!-- Battery Gauge -->
+                    <div class="flex items-center gap-3">
+                        <div class="relative w-12 h-12 rounded-full shrink-0" style="background: conic-gradient(var(--state-success) 0deg 288deg, var(--border-light) 288deg 360deg);">
+                            <div class="absolute inset-1 rounded-full flex items-center justify-center" style="background: var(--bg-surface);">
+                                <i data-lucide="battery-medium" class="w-4 h-4" style="color: var(--state-success);"></i>
+                            </div>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="text-xs" style="color: var(--text-tertiary);">预计可用</div>
+                            <div class="text-sm font-semibold" style="color: var(--text-primary);">6h 20min</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Emergency Call Button -->
+                <button class="w-full py-3 px-4 rounded-xl flex items-center justify-center gap-2 text-sm font-semibold whitespace-nowrap" style="background: var(--brand-primary); color: var(--text-inverse); box-shadow: 0 4px 14px rgba(233, 30, 99, 0.35);">
+                    <i data-lucide="phone-call" class="w-4 h-4"></i>
+                    紧急呼叫
+                </button>
+            </aside>
+
+            <!-- ===== CENTER MAP PANEL ~55% (vc-04, vc-05) ===== -->
+            <section class="flex-1 min-h-0 flex flex-col gap-3 p-3">
+                <!-- Map Container -->
+                <div class="flex-1 min-h-0 relative rounded-xl overflow-hidden" style="background: var(--bg-surface); box-shadow: var(--shadow-card);">
+                    <!-- Terminal Map Background -->
+                    <img src="../assets/terminal-map.jpg" alt="T3航站楼地图" class="w-full h-full object-cover">
+                    <!-- Navigation Overlay: Destination Marker -->
+                    <div class="absolute top-4 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl flex items-center gap-2" style="background: rgba(255,255,255,0.92); backdrop-filter: blur(12px); box-shadow: var(--shadow-md);">
+                        <i data-lucide="navigation" class="w-4 h-4" style="color: var(--brand-primary);"></i>
+                        <span class="text-sm font-semibold truncate" style="color: var(--text-primary);">前往 登机口 332</span>
+                    </div>
+                    <!-- Distance/Time Info (bottom overlay) -->
+                    <div class="absolute bottom-4 left-1/2 -translate-x-1/2 px-5 py-2 rounded-xl flex items-center gap-6" style="background: rgba(255,255,255,0.92); backdrop-filter: blur(12px); box-shadow: var(--shadow-md);">
+                        <div class="flex items-center gap-2">
+                            <i data-lucide="map-pin" class="w-4 h-4" style="color: var(--brand-primary);"></i>
+                            <span class="text-xs" style="color: var(--text-tertiary);">距离</span>
+                            <span class="text-sm font-semibold" style="color: var(--text-primary);">120m</span>
+                        </div>
+                        <div class="w-px h-5" style="background: var(--border-default);"></div>
+                        <div class="flex items-center gap-2">
+                            <i data-lucide="clock" class="w-4 h-4" style="color: var(--brand-primary);"></i>
+                            <span class="text-xs" style="color: var(--text-tertiary);">预计</span>
+                            <span class="text-sm font-semibold" style="color: var(--text-primary);">2分钟</span>
+                        </div>
+                    </div>
+                    <!-- Zoom Controls -->
+                    <div class="absolute right-4 top-1/2 -translate-y-1/2 flex flex-col gap-1 rounded-lg overflow-hidden" style="background: rgba(255,255,255,0.92); backdrop-filter: blur(12px); box-shadow: var(--shadow-md);">
+                        <button class="w-8 h-8 flex items-center justify-center" style="color: var(--text-secondary);">
+                            <i data-lucide="plus" class="w-4 h-4"></i>
+                        </button>
+                        <div class="w-full" style="height: 1px; background: var(--border-light);"></div>
+                        <button class="w-8 h-8 flex items-center justify-center" style="color: var(--text-secondary);">
+                            <i data-lucide="minus" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                </div>
+                <!-- Category Filter Chips (vc-05) -->
+                <div class="flex flex-nowrap gap-2 overflow-x-auto no-scrollbar py-1">
+                    <button class="shrink-0 px-4 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap" style="background: var(--brand-primary); color: var(--text-inverse);">
+                        <i data-lucide="map-pin" class="w-3.5 h-3.5"></i> 洗手间
+                    </button>
+                    <button class="shrink-0 px-4 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap" style="background: var(--bg-surface); color: var(--text-secondary); border: 1px solid var(--border-default);">
+                        <i data-lucide="plane" class="w-3.5 h-3.5"></i> 登机口
+                    </button>
+                    <button class="shrink-0 px-4 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap" style="background: var(--bg-surface); color: var(--text-secondary); border: 1px solid var(--border-default);">
+                        <i data-lucide="coffee" class="w-3.5 h-3.5"></i> 餐饮服务
+                    </button>
+                    <button class="shrink-0 px-4 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap" style="background: var(--bg-surface); color: var(--text-secondary); border: 1px solid var(--border-default);">
+                        <i data-lucide="armchair" class="w-3.5 h-3.5"></i> 休息区
+                    </button>
+                    <button class="shrink-0 px-4 py-1.5 rounded-full text-xs font-medium flex items-center gap-1.5 whitespace-nowrap" style="background: var(--bg-surface); color: var(--text-secondary); border: 1px solid var(--border-default);">
+                        <i data-lucide="zap" class="w-3.5 h-3.5"></i> 充电桩
+                    </button>
+                </div>
+            </section>
+
+            <!-- ===== RIGHT SIDEBAR ~25% (vc-06) ===== -->
+            <aside class="shrink-0 flex flex-col gap-3 p-3 overflow-y-auto no-scrollbar" style="width: 25%; min-width: 280px; max-width: 380px;">
+                <!-- Route Card -->
+                <div class="rounded-xl p-4 flex flex-col gap-3" style="background: var(--bg-surface); box-shadow: var(--shadow-card);">
+                    <h3 class="text-xs font-semibold" style="color: var(--text-tertiary);">导航路线</h3>
+                    <div class="flex items-center gap-2">
+                        <div class="w-3 h-3 rounded-full shrink-0" style="background: var(--state-info);"></div>
+                        <span class="text-sm font-medium truncate" style="color: var(--text-primary);">当前位置</span>
+                    </div>
+                    <div class="flex items-start gap-2" style="padding-left: 5px;">
+                        <div class="flex flex-col items-center gap-0" style="padding-top: 2px;">
+                            <div class="w-1.5 h-8 rounded-full" style="background: var(--brand-primary); opacity: 0.3;"></div>
+                        </div>
+                        <div class="w-1.5 h-1.5 rounded-full mt-1 shrink-0" style="background: var(--brand-primary); opacity: 0.3;"></div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <div class="w-3 h-3 rounded-full shrink-0" style="background: var(--brand-primary);"></div>
+                        <span class="text-sm font-medium truncate" style="color: var(--text-primary);">登机口 332</span>
+                    </div>
+                    <button class="w-full py-2.5 rounded-lg text-sm font-semibold text-center whitespace-nowrap" style="background: var(--brand-primary-gradient); color: var(--text-inverse); box-shadow: 0 4px 14px rgba(233, 30, 99, 0.3);">
+                        开始导航
+                    </button>
+                </div>
+
+                <!-- Promo Banner Card -->
+                <div class="rounded-xl overflow-hidden" style="box-shadow: var(--shadow-card);">
+                    <div class="relative" style="height: 120px;">
+                        <img src="../assets/promo-banner.jpg" alt="促销活动" class="w-full h-full object-cover">
+                        <div class="absolute inset-0 flex flex-col justify-end p-3" style="background: linear-gradient(to top, rgba(0,0,0,0.55), transparent);">
+                            <span class="text-xs font-medium" style="color: rgba(255,255,255,0.8);">限时活动</span>
+                            <span class="text-sm font-bold" style="color: white;">深圳机场会员日</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Airport Announcements -->
+                <div class="rounded-xl p-4 flex flex-col gap-3" style="background: var(--bg-surface); box-shadow: var(--shadow-card);">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-xs font-semibold" style="color: var(--text-tertiary);">机场公告</h3>
+                        <span class="text-xs" style="color: var(--brand-primary);">查看全部</span>
+                    </div>
+                    <!-- Announcement 1 -->
+                    <div class="flex items-start gap-2 pb-3" style="border-bottom: 1px solid var(--border-light);">
+                        <div class="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style="background: var(--brand-primary);"></div>
+                        <div class="flex-1 min-w-0">
+                            <p class="text-xs leading-relaxed line-clamp-2" style="color: var(--text-secondary);">T3航站楼B区安检通道已全部开放，请旅客合理安排出行时间。</p>
+                            <span class="text-xs mt-1 inline-block" style="color: var(--text-tertiary);">10分钟前</span>
+                        </div>
+                    </div>
+                    <!-- Announcement 2 -->
+                    <div class="flex items-start gap-2 pb-3" style="border-bottom: 1px solid var(--border-light);">
+                        <div class="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style="background: var(--state-warning);"></div>
+                        <div class="flex-1 min-w-0">
+                            <p class="text-xs leading-relaxed line-clamp-2" style="color: var(--text-secondary);">CA1386 北京首都至深圳宝安航班预计10:45到达，接机请前往A区到达层。</p>
+                            <span class="text-xs mt-1 inline-block" style="color: var(--text-tertiary);">25分钟前</span>
+                        </div>
+                    </div>
+                    <!-- Announcement 3 -->
+                    <div class="flex items-start gap-2">
+                        <div class="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style="background: var(--state-info);"></div>
+                        <div class="flex-1 min-w-0">
+                            <p class="text-xs leading-relaxed line-clamp-2" style="color: var(--text-secondary);">COFFEE@T3 全场第二杯半价，活动期间限T3店内使用。</p>
+                            <span class="text-xs mt-1 inline-block" style="color: var(--text-tertiary);">1小时前</span>
+                        </div>
+                    </div>
+                </div>
+            </aside>
+        </div>
+
+        <!-- ========== TICKER BAR (vc-08) ========== -->
+        <div class="shrink-0 flex items-center px-5 gap-4 overflow-hidden" style="height: 32px; background: var(--bg-surface); border-top: 1px solid var(--border-light);">
+            <span class="shrink-0 px-2 py-0.5 rounded text-xs font-semibold whitespace-nowrap" style="background: #FCE4EC; color: var(--brand-primary);">公告</span>
+            <div class="flex-1 min-w-0 overflow-hidden flex items-center gap-8">
+                <span class="text-xs whitespace-nowrap" style="color: var(--text-secondary);">禁带物品提示：请勿携带易燃易爆物品进入航站楼，详情请咨询安检处。</span>
+                <span class="text-xs whitespace-nowrap" style="color: var(--text-secondary);">CA1386 北京首都 → 深圳宝安 10:45 到达</span>
+                <span class="text-xs whitespace-nowrap" style="color: var(--text-secondary);">COFFEE@T3 全场第二杯半价，欢迎前往体验。</span>
+            </div>
+        </div>
+
+        <!-- ========== BOTTOM NAVIGATION BAR (vc-07) ========== -->
+        <nav class="shrink-0 flex items-center justify-around px-4" style="height: 60px; background: var(--bg-surface); border-top: 1px solid var(--border-default); box-shadow: 0 -1px 4px rgba(0,0,0,0.04);">
+            <!-- Active Tab: 地图 -->
+            <button class="flex flex-col items-center justify-center gap-0.5 px-4 py-1">
+                <div class="w-8 h-8 rounded-lg flex items-center justify-center" style="background: var(--brand-primary-gradient);">
+                    <i data-lucide="map" class="w-4 h-4" style="color: white;"></i>
+                </div>
+                <span class="text-xs font-semibold" style="color: var(--brand-primary);">地图</span>
+            </button>
+            <!-- Tab: 购物 -->
+            <button class="flex flex-col items-center justify-center gap-0.5 px-4 py-1">
+                <div class="w-8 h-8 flex items-center justify-center">
+                    <i data-lucide="shopping-bag" class="w-5 h-5" style="color: var(--text-tertiary);"></i>
+                </div>
+                <span class="text-xs" style="color: var(--text-tertiary);">购物</span>
+            </button>
+            <!-- Tab: 娱乐 -->
+            <button class="flex flex-col items-center justify-center gap-0.5 px-4 py-1">
+                <div class="w-8 h-8 flex items-center justify-center">
+                    <i data-lucide="gamepad-2" class="w-5 h-5" style="color: var(--text-tertiary);"></i>
+                </div>
+                <span class="text-xs" style="color: var(--text-tertiary);">娱乐</span>
+            </button>
+            <!-- Tab: 个人中心 -->
+            <button class="flex flex-col items-center justify-center gap-0.5 px-4 py-1">
+                <div class="w-8 h-8 flex items-center justify-center">
+                    <i data-lucide="user-circle" class="w-5 h-5" style="color: var(--text-tertiary);"></i>
+                </div>
+                <span class="text-xs" style="color: var(--text-tertiary);">个人中心</span>
+            </button>
+            <!-- Tab: 更多服务 -->
+            <button class="flex flex-col items-center justify-center gap-0.5 px-4 py-1">
+                <div class="w-8 h-8 flex items-center justify-center">
+                    <i data-lucide="grid-3x3" class="w-5 h-5" style="color: var(--text-tertiary);"></i>
+                </div>
+                <span class="text-xs" style="color: var(--text-tertiary);">更多服务</span>
+            </button>
+        </nav>
+    </div>
+
+    <script>lucide.createIcons();</script>
+</body>
+</html>

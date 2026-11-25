@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AudioStream Sender</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      padding: 16px 24px;
+      background: #1e293b;
+      border-bottom: 1px solid #334155;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 18px; font-weight: 600; color: #38bdf8; }
+
+    /* Mode toggle switch */
+    .mode-toggle-row { display: flex; align-items: center; gap: 10px; }
+    .mode-label { font-size: 13px; color: #94a3b8; transition: color 0.2s; user-select: none; }
+    .mode-label.active { color: #e2e8f0; font-weight: 600; }
+    .toggle-switch { position: relative; width: 48px; height: 26px; flex-shrink: 0; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+      background: #059669; border-radius: 26px; transition: 0.25s;
+    }
+    .toggle-slider::before {
+      content: ""; position: absolute; height: 20px; width: 20px;
+      left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.25s;
+    }
+    input:checked + .toggle-slider { background: #7c3aed; }
+    input:checked + .toggle-slider::before { transform: translateX(22px); }
+
+    /* IP selector */
+    .iface-select {
+      background: #0f172a; color: #94a3b8;
+      border: 1px solid #334155; border-radius: 6px;
+      padding: 4px 28px 4px 10px;
+      font-size: 12px; font-family: ui-monospace, monospace;
+      outline: none; cursor: pointer;
+      max-width: 140px;
+      -webkit-appearance: none; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='6'%3E%3Cpath d='M0 0l4 6 4-6z' fill='%2394a3b8'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 8px center;
+    }
+    .iface-select:focus { border-color: #38bdf8; }
+    .iface-select.hidden { display: none; }
+
+    main {
+      flex: 1;
+      padding: 24px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .card h2 { font-size: 14px; color: #94a3b8; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .room-code {
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: 4px;
+      color: #38bdf8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .room-url {
+      font-size: 12px;
+      color: #64748b;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      word-break: break-all;
+      margin-top: 6px;
+    }
+    .qr-area {
+      display: flex; justify-content: center; margin-top: 16px;
+    }
+    .qr-area img {
+      width: 180px; height: 180px; border-radius: 12px;
+      background: #fff; padding: 8px;
+    }
+    .qr-placeholder {
+      width: 180px; height: 180px; border-radius: 12px;
+      background: rgba(255,255,255,0.03); border: 1px dashed #334155;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; color: #64748b;
+    }
+    .btn-row { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+    button {
+      padding: 10px 18px;
+      border-radius: 8px;
+      border: none;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: #38bdf8; color: #0f172a; }
+    .btn-secondary { background: #334155; color: #e2e8f0; }
+    .btn-danger { background: #ef4444; color: #fff; }
+    .status-line { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 14px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #94a3b8; }
+    .dot.active { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+    .dot.error { background: #ef4444; }
+    .dot.warn { background: #fbbf24; }
+    .receiver-list { list-style: none; }
+    .receiver-list li { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #334155; }
+    .receiver-list li:last-child { border-bottom: none; }
+    .muted { color: #64748b; }
+    .log {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      color: #94a3b8;
+      max-height: 120px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+    select {
+      background: #0f172a;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 8px 12px;
+      width: 100%;
+      margin-top: 8px;
+    }
+    label { font-size: 13px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🎵 AudioStream Sender</h1>
+    <div class="mode-toggle-row">
+      <select class="iface-select" id="ifaceSelect"></select>
+      <span class="mode-label active" id="lanLabel">局域网</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="modeToggle">
+        <span class="toggle-slider"></span>
+      </label>
+      <span class="mode-label" id="cloudLabel">公网</span>
+    </div>
+  </header>
+  <main>
+    <div class="card">
+      <h2>房间状态</h2>
+      <div id="roomCode" class="room-code muted">---</div>
+      <div id="roomUrl" class="room-url"></div>
+      <div class="qr-area" id="qrArea">
+        <div class="qr-placeholder">扫码加入</div>
+      </div>
+      <div class="status-line">
+        <span id="statusDot" class="dot"></span>
+        <span id="statusText">正在初始化…</span>
+      </div>
+      <div class="btn-row">
+        <button id="btnCopy" class="btn-secondary" disabled>复制连接地址</button>
+        <button id="btnRecreate" class="btn-secondary" disabled>重新创建</button>
+        <button id="btnClose" class="btn-danger" disabled>停止推流</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>音频源</h2>
+      <label for="audioSource">选择系统音频源（桌面/应用窗口）</label>
+      <select id="audioSource">
+        <option value="">自动选择系统音频</option>
+      </select>
+      <div class="status-line">
+        <span id="audioDot" class="dot"></span>
+        <span id="audioText">未捕获音频</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>已连接听众</h2>
+      <ul id="receiverList" class="receiver-list">
+        <li class="muted">暂无听众</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>运行日志</h2>
+      <div id="log" class="log"></div>
+    </div>
+  </main>
+  <script type="module" src="sender.js"></script>
+</body>
+</html>

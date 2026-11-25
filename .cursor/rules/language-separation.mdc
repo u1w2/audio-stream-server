@@ -1,0 +1,59 @@
+---
+description: Language separation — Chinese for planning/communication, English for code and dev docs; UI i18n with Chinese default
+alwaysApply: true
+---
+
+# Language Separation (Planning vs Implementation)
+
+## Purpose
+
+Separate **product/requirements communication** (with the user) from **implementation artifacts** (code, dev docs). This keeps code reviewable internationally and keeps user–agent dialogue clear in Chinese.
+
+## Agent ↔ User (Chinese)
+
+- Plans, summaries, questions, trade-offs, and status updates: **简体中文**
+- Explain *what* and *why* to the user in Chinese
+- User-facing reports and delivery notes: **简体中文**
+
+## Internal Development Thinking (English)
+
+- Implementation thinking during development (debug notes, technical reasoning, TODO scratch notes, design deliberation): **English**
+- Keep internal engineering reasoning separate from user-facing communication language
+- This applies to development-process artifacts; it does not change end-user UI language rules
+
+## Code & Developer Documentation (English)
+
+- Source code: identifiers, comments, commit messages (when agent writes them), log tags, error codes — **English**
+- Project dev docs under `AudioStream_C++/` (e.g. `DESIGN.md`, `README.md`, inline API notes): **English**
+- Do not add Chinese in `.h`, `.cpp`, `.ts` implementation files unless it is **user-facing UI string** routed through i18n (see below)
+
+## End-User UI (i18n, Chinese default)
+
+- User-visible strings: use an **i18n layer** (e.g. `ui/strings/` or resource files), not hardcoded in logic
+- **Default locale: `zh-CN`** (install-and-use audience)
+- Structure for future locales (`en-US`, etc.); logic must not branch on raw Chinese text
+- Tray menus, dialogs, status lines, firewall hints: Chinese by default via locale files
+
+## Migration
+
+- When touching existing code with Chinese comments or dev strings, prefer converting to English in the same change if scope allows
+- Do not translate user-facing product copy in old web clients unless explicitly requested
+
+## Examples
+
+```cpp
+// ✅ GOOD — English in code
+Logger::Info("Room created: " + roomCode);
+
+// ❌ BAD — Chinese in implementation
+Logger::Info("房间已创建: " + roomCode);
+
+// ✅ GOOD — UI via i18n (default zh-CN resource)
+statusText->SetText(Strings::Get(L"status.room_running"));
+```
+
+```markdown
+User message: 继续开发 Phase 1
+Agent reply: 简体中文说明进度与下一步
+Code added: English only in .cpp / DESIGN.md
+```

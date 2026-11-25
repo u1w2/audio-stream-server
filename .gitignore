@@ -1,3 +1,7 @@
 node_modules/
 logs/
 data/
+build/
+dist-electron/
+*.zip
+.cursor/*.log

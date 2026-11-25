@@ -1,0 +1,88 @@
+:root {
+  /* === Brand Colors === */
+  --brand-primary: #E91E63;
+  --brand-primary-dark: #C2185B;
+  --brand-primary-light: #F06292;
+  --brand-primary-gradient: linear-gradient(135deg, #E91E63, #C2185B);
+  --brand-primary-gradient-light: linear-gradient(135deg, #F06292, #E91E63);
+
+  /* === Backgrounds === */
+  --bg-body: #F0F2F5;
+  --bg-surface: #FFFFFF;
+  --bg-surface-elevated: #FFFFFF;
+  --bg-sidebar: #FAFBFC;
+  --bg-header: #FFFFFF;
+  --bg-overlay: rgba(0, 0, 0, 0.45);
+
+  /* === Text Colors === */
+  --text-primary: #1A1A2E;
+  --text-secondary: #555770;
+  --text-tertiary: #8E8EA9;
+  --text-inverse: #FFFFFF;
+  --text-accent: #E91E63;
+
+  /* === Border / Divider === */
+  --border-default: #E8EAF0;
+  --border-light: #F0F1F5;
+  --divider: #ECEEF3;
+
+  /* === Semantic Colors === */
+  --state-success: #4CAF50;
+  --state-warning: #FF9800;
+  --state-error: #F44336;
+  --state-info: #2196F3;
+
+  /* === Shadows === */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 8px 32px rgba(0, 0, 0, 0.12);
+  --shadow-card: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --shadow-float: 0 4px 20px rgba(0, 0, 0, 0.12);
+
+  /* === Radius === */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 9999px;
+
+  /* === Typography === */
+  --font-family: 'PingFang SC', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-size-xs: 11px;
+  --font-size-sm: 12px;
+  --font-size-base: 14px;
+  --font-size-md: 15px;
+  --font-size-lg: 18px;
+  --font-size-xl: 22px;
+  --font-size-2xl: 28px;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --line-height-tight: 1.25;
+  --line-height-normal: 1.5;
+  --line-height-relaxed: 1.75;
+
+  /* === Spacing === */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 20px;
+  --spacing-2xl: 24px;
+  --spacing-3xl: 32px;
+}
+
+/* === Prefixed Semantic Aliases (sz-airport) === */
+:root {
+  --sz-airport-background: var(--bg-body);
+  --sz-airport-foreground: var(--text-primary);
+  --sz-airport-card: var(--bg-surface);
+  --sz-airport-primary: var(--brand-primary);
+  --sz-airport-border: var(--border-default);
+  --sz-airport-muted: var(--text-tertiary);
+  --sz-airport-radius-sm: var(--radius-sm);
+  --sz-airport-radius-md: var(--radius-md);
+  --sz-airport-radius-lg: var(--radius-lg);
+}

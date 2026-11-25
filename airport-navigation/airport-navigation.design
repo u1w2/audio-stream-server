@@ -1,0 +1,67 @@
+{
+  "data": [
+    {
+      "id": "page-navigation-dashboard",
+      "title": "智能导航主界面",
+      "type": "page",
+      "version": 1,
+      "createdAt": 1752576000000,
+      "canvasData": {
+        "x": 0,
+        "y": 0,
+        "group": 0
+      },
+      "devMetadata": {
+        "htmlSrc": "pages/navigation-dashboard.html",
+        "interactions": []
+      }
+    },
+    {
+      "id": "image-001",
+      "title": "服务机器人 3D 渲染",
+      "type": "image",
+      "version": 1,
+      "createdAt": 1752576000000,
+      "canvasData": {
+        "x": 0,
+        "y": 377
+      },
+      "devMetadata": {
+        "imageSrc": "assets/robot-3d.jpg"
+      }
+    },
+    {
+      "id": "image-002",
+      "title": "航站楼 3D 地图",
+      "type": "image",
+      "version": 1,
+      "createdAt": 1752576000000,
+      "canvasData": {
+        "x": 620,
+        "y": 377
+      },
+      "devMetadata": {
+        "imageSrc": "assets/terminal-map.jpg"
+      }
+    },
+    {
+      "id": "image-003",
+      "title": "促销横幅背景",
+      "type": "image",
+      "version": 1,
+      "createdAt": 1752576000000,
+      "canvasData": {
+        "x": 1240,
+        "y": 377
+      },
+      "devMetadata": {
+        "imageSrc": "assets/promo-banner.jpg"
+      }
+    }
+  ],
+  "config": {
+    "autoLayout": true,
+    "deviceType": "desktop",
+    "projectName": "深圳机场智能导航系统"
+  }
+}
